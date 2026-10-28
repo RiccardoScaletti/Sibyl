@@ -258,11 +258,7 @@ function Select-Library {
     return $current
 }
 
-function Read-State($Manifest) {
-    $path = Join-Path (Get-GameHome $Manifest) 'state.json'
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    try { return [IO.File]::ReadAllText($path) | ConvertFrom-Json } catch { return $null }
-}
+function Read-State($Manifest) { return Read-GameState (Get-GameHome $Manifest) }
 
 function Save-State($Manifest, $State) {
     Write-TextFile (Join-Path (Get-GameHome $Manifest) 'state.json') ($State | ConvertTo-Json)

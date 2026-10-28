@@ -517,10 +517,33 @@ function Get-LibraryPath {
     return $default
 }
 
+# Stato di un gioco installato (state.json nella sua cartella della libreria). Se la libreria e' stata
+# spostata o rinominata, installDir punta ancora al posto vecchio: se il gioco e' nella sua cartella
+# "game" accanto allo stato, si corregge il percorso e lo si salva.
+function Read-GameState([string]$GameHome) {
+    $path = Join-Path $GameHome 'state.json'
+    $state = Read-Manifest $path
+    if (-not $state) { return $null }
+    $dir = Get-Prop $State 'installDir'
+    $local = Join-Path $GameHome 'game'
+    if ((-not $dir -or -not (Test-Path -LiteralPath $dir)) -and (Test-Path -LiteralPath $local)) {
+        $old = $dir
+        $state.installDir = $local
+        foreach ($name in 'launchExe', 'displayIcon') {
+            $value = Get-Prop $state $name
+            if ($old -and $value -and $value.StartsWith($old, [StringComparison]::OrdinalIgnoreCase)) {
+                $state.$name = $local + $value.Substring($old.Length)
+            }
+        }
+        Write-TextFile $path ($state | ConvertTo-Json)
+    }
+    return $state
+}
+
 function Get-InstalledGames([string]$Library) {
     if (-not (Test-Path -LiteralPath $Library)) { return @() }
     return @(foreach ($dir in Get-ChildItem -LiteralPath $Library -Directory) {
-        $state = Read-Manifest (Join-Path $dir.FullName 'state.json')
+        $state = Read-GameState $dir.FullName
         if (-not $state) { continue }
         [pscustomobject]@{ Home = $dir.FullName; State = $state; Title = $state.title; Version = $state.version }
     })
