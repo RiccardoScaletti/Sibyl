@@ -416,6 +416,7 @@ if (-not ('Sibyl.Native' -as [type])) {
 [DllImport("kernel32.dll")] public static extern uint SetErrorMode(uint mode);
 [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool CreateHardLink(string newFile, string existingFile, IntPtr security);
 '@
 }
 [void][Sibyl.Native]::SetErrorMode(0x8001)   # SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX
@@ -522,8 +523,77 @@ function Get-InstalledGames([string]$Library) {
     })
 }
 
-# Disinstalla un gioco: prima il disinstallatore GOG (unins000.exe, chiede i permessi di Windows),
-# poi cancella la sua cartella nella libreria (stato, log e file rimasti). Restituisce $true se e' sparita.
+# ---------------------------------------------------------------- installer di ogni tipo
+
+# Tipo di installer, riconosciuto dalle firme che lasciano dentro l'exe (primi 16 MB):
+# inno (GOG e molti altri), nsis, installshield, wix, msi; 'unknown' se non si riconosce.
+# Inno, NSIS e MSI si installano in silenzio in una cartella scelta da Sibyl; gli altri con le loro finestre.
+function Get-InstallerType([string]$Path) {
+    if ([IO.Path]::GetExtension($Path) -ieq '.msi') { return 'msi' }
+    $signatures = [ordered]@{
+        inno          = 'Inno Setup Setup Data'
+        nsis          = 'NullsoftInst'
+        installshield = 'InstallShield'
+        wix           = '.wixburn'
+    }
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            $buffer = New-Object byte[] ([math]::Min($stream.Length, 16MB))
+            [void]$stream.Read($buffer, 0, $buffer.Length)
+        } finally { $stream.Dispose() }
+        $text = [Text.Encoding]::ASCII.GetString($buffer)
+        foreach ($type in $signatures.Keys) { if ($text.Contains($signatures[$type])) { return $type } }
+    } catch { }
+    return 'unknown'
+}
+
+# Le voci di "App installate" di Windows. Confrontando l'elenco prima e dopo un'installazione si
+# scopre dove e' finito il gioco, qual e' il suo exe (l'icona) e come si disinstalla.
+function Get-UninstallEntries {
+    $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    return @(foreach ($p in $paths) {
+        foreach ($item in Get-ItemProperty -Path $p -ErrorAction SilentlyContinue) {
+            [pscustomobject]@{
+                Key             = $item.PSPath
+                Name            = Get-Prop $item 'DisplayName'
+                InstallLocation = Get-Prop $item 'InstallLocation'
+                DisplayIcon     = Get-Prop $item 'DisplayIcon'
+                Uninstall       = Get-Prop $item 'UninstallString'
+                QuietUninstall  = Get-Prop $item 'QuietUninstallString'
+            }
+        }
+    })
+}
+
+# Il percorso di un exe dentro un campo come DisplayIcon: "C:\Giochi\game.exe",0
+function Get-ExeFromIcon([string]$Icon) {
+    if (-not $Icon) { return $null }
+    $path = ($Icon -replace ',\s*-?\d+$', '').Trim().Trim('"')
+    if ($path -like '*.exe') { return $path }
+    return $null
+}
+
+# "C:\Program Files\Gioco\uninst.exe" /S  ->  FilePath + Arguments per Start-Process
+function Split-CommandLine([string]$Command) {
+    $Command = $Command.Trim()
+    if ($Command.StartsWith('"')) {
+        $end = $Command.IndexOf('"', 1)
+        return @{ FilePath = $Command.Substring(1, $end - 1); Arguments = $Command.Substring($end + 1).Trim() }
+    }
+    $i = $Command.ToLower().IndexOf('.exe')
+    if ($i -ge 0) { return @{ FilePath = $Command.Substring(0, $i + 4); Arguments = $Command.Substring($i + 4).Trim() } }
+    $parts = $Command -split '\s+', 2
+    return @{ FilePath = $parts[0]; Arguments = $(if ($parts.Count -gt 1) { $parts[1] } else { '' }) }
+}
+
+# Disinstalla un gioco e cancella la sua cartella nella libreria (stato, log e file rimasti).
+# Disinstallatore, nell'ordine: unins*.exe di Inno Setup (GOG, silenzioso), quello silenzioso registrato
+# in Windows, quello normale (MSI in silenzio, gli altri con le loro finestre). Restituisce $true se e' sparita.
 function Uninstall-Game([string]$GameHome, $State, [string]$Library) {
     # Si cancella solo una cartella che sta davvero dentro la libreria
     $root = [IO.Path]::GetFullPath($Library).TrimEnd('\') + '\'
@@ -531,22 +601,40 @@ function Uninstall-Game([string]$GameHome, $State, [string]$Library) {
         throw "La cartella del gioco non e' dentro la libreria: $GameHome"
     }
     $dir = Get-Prop $State 'installDir'
-    $uninstaller = $null
+    $command = $null
+    $inno = $null
     if ($dir -and (Test-Path -LiteralPath $dir)) {
-        $uninstaller = Get-ChildItem -LiteralPath $dir -Filter 'unins*.exe' -File | Sort-Object Name | Select-Object -First 1
+        $inno = Get-ChildItem -LiteralPath $dir -Filter 'unins*.exe' -File | Sort-Object Name | Select-Object -First 1
     }
-    if ($uninstaller) {
-        try { $process = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -PassThru }
+    if ($inno) {
+        $command = @{ FilePath = $inno.FullName; Arguments = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' }
+    } elseif (Get-Prop $State 'quietUninstall') {
+        $command = Split-CommandLine $State.quietUninstall
+    } elseif (Get-Prop $State 'uninstallString') {
+        $command = Split-CommandLine $State.uninstallString
+        if ($command.FilePath -match 'msiexec') {
+            $command.Arguments = ($command.Arguments -replace '/I', '/X') + ' /qn /norestart'
+        } else {
+            Write-Info 'Segui la disinstallazione nella finestra del disinstallatore.'
+        }
+    }
+
+    if ($command) {
+        $params = @{ FilePath = $command.FilePath; PassThru = $true }
+        if ($command.Arguments) { $params.ArgumentList = $command.Arguments }
+        try { $process = Start-Process @params }
         catch { Write-Alert 'Disinstallazione annullata: servono i permessi di Windows'; return $false }
-        # Il disinstallatore di Inno Setup si copia altrove e chiude l'originale: ha finito quando
-        # il suo .exe sparisce dalla cartella del gioco (lo cancella per ultimo)
+        # Molti disinstallatori (Inno Setup, NSIS) si copiano altrove e chiudono l'originale: hanno
+        # finito quando il loro .exe sparisce dalla cartella del gioco. Si aspetta al massimo 3 minuti.
+        $exe = $command.FilePath
+        $watchExe = $dir -and $exe.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase)
         $start = Get-Date
         $tick = 0
-        $until = $null   # dopo la chiusura dell'originale si aspetta al massimo 3 minuti la seconda fase
+        $until = $null
         while ($true) {
             if ($process.HasExited) {
                 if (-not $until) { $until = (Get-Date).AddMinutes(3) }
-                if (-not (Test-Path -LiteralPath $uninstaller.FullName) -or (Get-Date) -gt $until) { break }
+                if (-not $watchExe -or -not (Test-Path -LiteralPath $exe) -or (Get-Date) -gt $until) { break }
             }
             Write-ProgressBar 'Disinstallazione' -1 ((Get-Date) - $start).ToString('mm\:ss') ($tick++)
             Start-Sleep -Milliseconds 200
@@ -558,9 +646,41 @@ function Uninstall-Game([string]$GameHome, $State, [string]$Library) {
     return -not (Test-Path -LiteralPath $GameHome)
 }
 
+# ---------------------------------------------------------------- dischi multipli
+
+# Un gioco piu' grande di un disco viene diviso su piu' dischi: ogni disco ha lo stesso manifest con
+# "disc" (questo disco) e "discs" (quanti sono), e ogni file del manifest dice su quale disco sta.
+function Get-DiscNumber($Manifest) { $n = Get-Prop $Manifest 'disc'; if ($n) { return [int]$n }; return 1 }
+function Get-DiscCount($Manifest) { $n = Get-Prop $Manifest 'discs'; if ($n) { return [int]$n }; return 1 }
+function Get-FileDisc($File) { $n = Get-Prop $File 'disc'; if ($n) { return [int]$n }; return 1 }
+
+# Due dischi fanno parte della stessa serie se vengono dalla stessa preparazione dello stesso gioco
+function Test-SameSet($A, $B) {
+    return $A -and $B -and $A.id -eq $B.id -and (Get-Prop $A 'version') -eq (Get-Prop $B 'version') -and
+        (Get-Prop $A 'prepared') -eq (Get-Prop $B 'prepared')
+}
+
+# Espelle il disco di un'unita' (es. F:\) per far inserire il successivo
+function Invoke-DriveEject([string]$Root) {
+    try {
+        $item = (New-Object -ComObject Shell.Application).Namespace(17).ParseName($Root)
+        if ($item) { $item.InvokeVerb('Eject') }
+    } catch { }
+}
+
+# Tasto premuto adesso, senza aspettare; $null se nessuno (o se l'input non e' una console)
+function Read-KeyNow {
+    try { if ([Console]::KeyAvailable) { return [Console]::ReadKey($true) } } catch { }
+    return $null
+}
+
 # Schermata comune a Launcher e Organizer: riepilogo, avviso sui salvataggi, conferma, disinstallazione
 function Invoke-UninstallScreen([string]$Title, [string]$GameHome, $State, [string]$Library) {
-    $bytes = [long](Get-ChildItem -LiteralPath $GameHome -File -Recurse -ErrorAction SilentlyContinue |
+    # Un installer non GOG puo' aver messo il gioco fuori dalla libreria: si misura la cartella vera
+    $measured = $GameHome
+    $installDir = Get-Prop $State 'installDir'
+    if ($installDir -and (Test-Path -LiteralPath $installDir)) { $measured = $installDir }
+    $bytes = [long](Get-ChildItem -LiteralPath $measured -File -Recurse -ErrorAction SilentlyContinue |
         Measure-Object -Property Length -Sum).Sum
     Write-Box @(
         ''
@@ -613,7 +733,9 @@ function Get-FileSha256([string]$Path, [scriptblock]$OnChunk) {
 # Confronta i file di un disco (o di una cartella) con il manifest: presenza, dimensione, SHA-256.
 # $OnProgress riceve (byte controllati, byte totali, percorso). Restituisce i problemi trovati.
 function Test-DiscFiles([string]$Root, $Manifest, [scriptblock]$OnProgress) {
-    $files = @($Manifest.files)
+    # Solo i file di questo disco (in un gioco su piu' dischi gli altri stanno altrove)
+    $disc = Get-DiscNumber $Manifest
+    $files = @($Manifest.files | Where-Object { (Get-FileDisc $_) -eq $disc })
     $problems = New-Object System.Collections.Generic.List[string]
     $progress = @{ Done = 0L; Total = [long]($files | ForEach-Object { $_.size } | Measure-Object -Sum).Sum; Path = '' }
     $report = { param($bytes) $progress.Done += $bytes; if ($OnProgress) { & $OnProgress $progress.Done $progress.Total $progress.Path } }

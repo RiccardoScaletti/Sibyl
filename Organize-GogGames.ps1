@@ -198,6 +198,34 @@ function Copy-GameFile([string]$From, [string]$To) {
     return 'done'
 }
 
+# LEGGIMI.txt del disco: scheda del gioco e istruzioni anche per chi non ha Sibyl
+function Write-Readme([string]$Folder, [string]$Title, [string]$Version, [string]$Build, [long]$TotalBytes,
+                      [string]$MediaName, [string]$StartFolder, [string]$StartFile, $FileRecords) {
+    $lines = @(
+        '+==================================================================+'
+        '|   S I B Y L    ::    D I S C O   G I O C O                       |'
+        '+==================================================================+'
+        ''
+        "  Titolo     : $Title"
+        "  Versione   : $Version"
+        "  Build      : $Build"
+        "  Dimensione : $(Format-Size $TotalBytes)"
+        "  Supporto   : $MediaName"
+        "  Preparato  : $((Get-Date).ToString('yyyy-MM-dd'))"
+        ''
+        '  COME SI USA'
+        '  - Con Sibyl: inserisci il disco, il gioco viene riconosciuto'
+        "    da $ManifestName e avviato."
+        "  - Senza Sibyl: apri la cartella $StartFolder ed esegui"
+        "    $StartFile"
+        '    (gli altri file devono restare nella stessa cartella).'
+        ''
+        '  CONTENUTO'
+    )
+    $lines += $FileRecords | ForEach-Object { '    {0,-52} {1,10}' -f $_.path, (Format-Size $_.size) }
+    Write-TextFile (Join-Path $Folder 'LEGGIMI.txt') (($lines -join "`r`n") + "`r`n")
+}
+
 function Test-BinSequence($Game) {
     $numbers = @($Game.Entries | Where-Object { $_.Category -eq 'Installer' -and $_.File.Name -match '-(\d+)\.bin$' } |
         ForEach-Object { [int]($_.File.Name -replace '^.*-(\d+)\.bin$', '$1') } | Sort-Object)
@@ -207,13 +235,144 @@ function Test-BinSequence($Game) {
 
 # ---------------------------------------------------------------- interazione
 
-# Chiede una cartella finche' non ne viene data una esistente
-function Read-Folder([string]$Prompt) {
+# Chiede una cartella finche' non ne viene data una esistente (con -AllowEmpty, INVIO annulla: $null)
+function Read-Folder([string]$Prompt, [switch]$AllowEmpty) {
     while ($true) {
         $path = Read-Text $Prompt
+        if (-not $path -and $AllowEmpty) { return $null }
         if ($path -and (Test-Path -LiteralPath $path -PathType Container)) { return (Resolve-Path -LiteralPath $path).ProviderPath }
         Write-Alert "Cartella non trovata: $path"
     }
+}
+
+# Sceglie un elemento da un elenco numerato; INVIO = $Default (o $null se non c'e')
+function Read-NumberChoice([string]$Prompt, [int]$Count, [int]$Default = 0) {
+    while ($true) {
+        $answer = Read-Answer $Prompt
+        if (-not $answer) { if ($Default) { return $Default }; return $null }
+        $n = 0
+        if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $Count) { return $n }
+        Write-Alert "Scrivi un numero da 1 a $Count"
+    }
+}
+
+# [I]: importa un gioco non GOG da una cartella qualsiasi: un installer (Inno Setup, NSIS, MSI, ...)
+# oppure un gioco gia' pronto da avviare (portable). La cartella nella libreria e' come per i giochi GOG.
+# Restituisce il gioco preparato (per masterizzarlo) o $null se annullato.
+function Invoke-ImportFlow {
+    Write-Host ''
+    Write-Step 'Importa un gioco non GOG'
+    Write-Info 'Va bene una cartella con un installer (setup.exe, .msi) oppure con un gioco gia'' pronto da avviare.'
+    $source = Read-Folder 'Cartella del gioco (puoi trascinarla qui, INVIO per annullare)' -AllowEmpty
+    if (-not $source) { return $null }
+    $leaf = Split-Path -Leaf $source
+    $title = Read-Text "Titolo del gioco   [INVIO] = $leaf"
+    if (-not $title) { $title = $leaf }
+    $version = Read-Text 'Versione   [INVIO] = 1.0'
+    if (-not $version) { $version = '1.0' }
+
+    $prefix = $source.TrimEnd('\') + '\'
+    $all = @(Get-ChildItem -LiteralPath $source -File -Recurse)
+    if (-not $all.Count) { Write-Alert 'La cartella e'' vuota.'; return $null }
+    $relative = { param($File) $File.FullName.Substring($prefix.Length) }
+
+    # Installer candidati: .exe e .msi fino a due sottocartelle, prima quelli che si chiamano setup/install
+    $installers = @($all | Where-Object { $_.Extension -in '.exe', '.msi' -and ((& $relative $_) -split '\\').Count -le 3 } |
+        Sort-Object @{ e = { if ($_.BaseName -match '^(setup|install)') { 0 } elseif ($_.Extension -eq '.msi') { 1 } else { 2 } } },
+                    @{ e = 'Length'; Descending = $true } |
+        Select-Object -First 9)
+    Write-Host ''
+    Write-Box @('*COME SI INSTALLA?')
+    $types = @{}
+    for ($i = 0; $i -lt $installers.Count; $i++) {
+        $types[$i] = Get-InstallerType $installers[$i].FullName
+        Write-Host ('   [{0}]  ' -f ($i + 1)) -ForegroundColor $Theme.Accent -NoNewline
+        Write-Host ('{0,-46} ' -f (& $relative $installers[$i])) -ForegroundColor $Theme.Text -NoNewline
+        Write-Host $types[$i] -ForegroundColor $Theme.Muted
+    }
+    Write-Keys ' [P]  nessun installer: gioco gia'' pronto da avviare'
+    Write-Host ''
+    $portable = $false
+    $installer = $null
+    $installerType = ''
+    while ($true) {
+        $answer = Read-Answer 'Scegli l''installer (numero), P oppure INVIO per annullare'
+        if (-not $answer) { return $null }
+        if ($answer -eq 'P') { $portable = $true; break }
+        $n = 0
+        if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $installers.Count) {
+            $installer = $installers[$n - 1]
+            $installerType = $types[$n - 1]
+            break
+        }
+        Write-Alert "Scrivi un numero da 1 a $($installers.Count), P oppure INVIO"
+    }
+    if ($installer -and $installerType -notin 'inno', 'nsis', 'msi') {
+        Write-Info 'Questo installer non si puo'' usare in silenzio: il Launcher lo aprira'' con le sue finestre.'
+    }
+
+    $launchRel = ''
+    if ($portable) {
+        $exes = @($all | Where-Object { $_.Extension -eq '.exe' -and $_.Name -notmatch '^(unins|setup|install|dxsetup|vc_?redist|dotnet|crash)' } |
+            Sort-Object Length -Descending | Select-Object -First 9)
+        if (-not $exes.Count) { Write-Alert 'Nella cartella non c''e'' nessun .exe da avviare.'; return $null }
+        Write-Host ''
+        Write-Box @('*QUALE FILE AVVIA IL GIOCO?')
+        for ($i = 0; $i -lt $exes.Count; $i++) {
+            Write-Host ('   [{0}]  ' -f ($i + 1)) -ForegroundColor $Theme.Accent -NoNewline
+            Write-Host (& $relative $exes[$i]) -ForegroundColor $Theme.Text
+        }
+        $n = Read-NumberChoice 'Numero   [INVIO] = 1' $exes.Count 1
+        $launchRel = (& $relative $exes[$n - 1]) -replace '\\', '/'
+    }
+
+    $startFolder = if ($portable) { 'Game' } else { 'Installer' }
+    $folderName = Get-SafeName "$title ($version)"
+    $folder = Join-Path $Destination $folderName
+    $id = ($title.ToLower() -replace '[^a-z0-9]+', '_').Trim('_')
+    if (-not $id) { $id = 'gioco' }
+
+    Write-Host ''
+    Write-Host '  +--[ ' -ForegroundColor $Theme.Frame -NoNewline
+    Write-Host $title -ForegroundColor $Theme.Accent -NoNewline
+    Write-Host ' ]' -ForegroundColor $Theme.Frame
+    $records = New-Object System.Collections.Generic.List[object]
+    foreach ($f in $all) {
+        $target = Join-Path $startFolder (& $relative $f)
+        $dst = Join-Path $folder $target
+        $result = Copy-GameFile $f.FullName $dst
+        $verb = if ($result -eq 'skip') { 'gia'' presente' } elseif ($Move) { 'spostato' } else { 'copiato' }
+        Write-Info "|   [$verb] $target"
+        $sha = ''
+        if (-not $NoHash) { $sha = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash.ToLower() }
+        $manifestPathKey = $target -replace '\\', '/'
+        $records.Add([ordered]@{ path = $manifestPathKey; category = $startFolder; size = $f.Length; sha256 = $sha })
+    }
+    $total = [long]($records | ForEach-Object { [long]$_.size } | Measure-Object -Sum).Sum
+    $mediaName = Get-SuggestedMedia $total
+
+    $manifest = [ordered]@{
+        sibyl          = $ManifestVersion
+        id             = $id
+        title          = $title
+        version        = $version
+        build          = ''
+        store          = 'altro'
+        platform       = 'windows'
+        mode           = $(if ($portable) { 'portable' } else { 'install' })
+        installer      = $(if ($installer) { 'Installer/' + ((& $relative $installer) -replace '\\', '/') } else { '' })
+        installerType  = $installerType   # inno | nsis | msi in silenzio; gli altri con le loro finestre
+        launch         = [ordered]@{ exe = $launchRel; args = ''; workingDir = '' }
+        sizeBytes      = $total
+        suggestedMedia = $mediaName
+        prepared       = (Get-Date).ToString('s')
+        files          = $records.ToArray()
+    }
+    Write-TextFile (Join-Path $folder $ManifestName) ($manifest | ConvertTo-Json -Depth 6)
+    $startFile = if ($portable) { $launchRel } else { Split-Path -Leaf $installer.FullName }
+    Write-Readme $folder $title $version '' $total $mediaName $startFolder $startFile $records
+    Write-Ok "$title pronto"
+    return [pscustomobject]@{ Title = $title; Folder = $folder; FolderName = $folderName; TotalBytes = $total; MediaName = $mediaName }
 }
 
 # Restituisce il numero del gioco (1..N), 'all' oppure $null per uscire
@@ -232,6 +391,7 @@ function Show-GameMenu($List) {
     }
     Write-Host ''
     Write-Keys ' [ T]  prepara tutti (senza masterizzare)'
+    Write-Keys ' [ I]  importa un gioco non GOG (da una cartella)'
     Write-Keys ' [ D]  disinstalla un gioco installato'
     Write-Keys ' [ M]  menu principale'
     Write-Keys ' [ Q]  esci'
@@ -241,10 +401,11 @@ function Show-GameMenu($List) {
         if ($answer -eq 'Q') { return $null }
         if ($answer -eq 'M') { return 'menu' }
         if ($answer -eq 'D') { return 'uninstall' }
-        if ($answer -eq 'T') { return 'all' }
+        if ($answer -eq 'I') { return 'import' }
+        if ($answer -eq 'T' -and $List.Count) { return 'all' }
         $n = 0
         if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $List.Count) { return $n }
-        Write-Alert "Scrivi un numero da 1 a $($List.Count), T, D, M oppure Q"
+        Write-Alert "Scrivi un numero da 1 a $($List.Count), T, I, D, M oppure Q"
     }
 }
 
@@ -302,61 +463,101 @@ function Select-Burner {
     }
 }
 
-# Masterizza la cartella del gioco e verifica il disco. Restituisce la radice del disco, o $null.
-function Invoke-BurnFlow($Game) {
-    $manifest = Read-Manifest (Get-ManifestPath $Game.Folder)
+# Aspetta nel masterizzatore un disco scrivibile da almeno $MinBytes. Controlla da solo ogni 1,5 s
+# (non serve INVIO); [A] annulla. Restituisce @{ Media; Erase } oppure $null se annullato.
+function Wait-BlankDisc($Burner, [string]$Prompt, [long]$MinBytes) {
     Write-Host ''
-    Write-Step "Masterizzazione di $($manifest.title)"
-    $burner = Select-Burner
-    if (-not $burner) { Write-Info 'Masterizzazione saltata.'; return $null }
-
-    $erase = $false
+    Write-Keys "$Prompt   [A] annulla"
+    $tick = 0
+    $next = [datetime]::MinValue
+    $status = 'In attesa del disco...'
     while ($true) {
-        $media = Get-MediaState $burner
-        $problem = switch ($media.State) {
-            'empty'       { "Nessun disco in $($burner.Root)" }
-            'unsupported' { "Il disco in $($burner.Root) ($($media.Name)) non e' scrivibile" }
-            'used'        { "Il disco $($media.Name) in $($burner.Root) contiene gia' dati e non e' riscrivibile" }
-            default       { $null }
+        $key = Read-KeyNow
+        if ($key -and "$($key.KeyChar)".ToUpper() -eq 'A') { Write-Host ''; return $null }
+        if ((Get-Date) -ge $next) {
+            $media = Get-MediaState $Burner
+            $big = $MinBytes -le 0 -or $media.Capacity * $MediaMargin -ge $MinBytes
+            if ($media.State -eq 'blank' -and $big) { Write-Host ''; return @{ Media = $media; Erase = $false } }
+            if ($media.State -eq 'erasable' -and $big) {
+                Write-Host ''
+                Write-Alert "Il disco $($media.Name) in $($Burner.Root) contiene gia' dati."
+                if (Test-Yes (Read-Answer 'Cancellarlo e riscriverlo? [S/N]')) { return @{ Media = $media; Erase = $true } }
+                Invoke-DriveEject $Burner.Root
+                Write-Keys "$Prompt   [A] annulla"
+            }
+            $status = switch ($media.State) {
+                'empty'       { 'In attesa del disco...' }
+                'unsupported' { "Il disco in $($Burner.Root) ($($media.Name)) non e' scrivibile" }
+                'used'        { "Il disco $($media.Name) in $($Burner.Root) contiene gia' dati e non e' riscrivibile" }
+                default       { if ($big) { 'In attesa del disco...' } else { "Disco troppo piccolo: servono $(Format-Size $MinBytes)" } }
+            }
+            $next = (Get-Date).AddMilliseconds(1500)
         }
-        if (-not $problem -and $Game.TotalBytes -gt $media.Capacity * $MediaMargin) {
-            $problem = "Il gioco ($(Format-Size $Game.TotalBytes)) non entra in un $($media.Name) ($(Format-Size $media.Capacity)): serve $($Game.MediaName)"
-        }
-        if (-not $problem -and $media.State -eq 'erasable') {
-            Write-Alert "Il disco $($media.Name) in $($burner.Root) contiene gia' dati."
-            if (Test-Yes (Read-Answer 'Cancellarlo e riscriverlo? [S/N]')) { $erase = $true; break }
-            $problem = 'Disco da cambiare'
-        }
-        if (-not $problem) { break }
-        Write-Alert $problem
-        if ((Read-Answer "Inserisci un disco vuoto in $($burner.Root) e premi INVIO (Q per saltare)") -eq 'Q') {
-            Write-Info 'Masterizzazione saltata.'
-            return $null
-        }
-        Start-Sleep -Seconds 2   # il lettore impiega un attimo a leggere il disco appena inserito
+        Write-Status ('[{0}] {1}' -f $Spinner[$tick++ % 4], (T $status)) $Theme.Accent
+        Start-Sleep -Milliseconds 150
     }
+}
 
-    $label = Get-VolumeLabel $manifest.title
-    Write-Host ''
-    Write-Info "Gioco     : $($manifest.title)  ($(Format-Size $Game.TotalBytes))"
-    Write-Info "Disco     : $($media.Name) in $($burner.Root)  [$($burner.Name)]"
-    Write-Info "Etichetta : $label"
-    if ($erase) { Write-Alert "Il contenuto attuale del disco verra' cancellato." }
-    if (-not (Test-Yes (Read-Answer 'Avvio la masterizzazione? [S/N]'))) { Write-Info 'Masterizzazione annullata.'; return $null }
+# Divide i file tra i dischi riempiendone uno alla volta (prima gli installer, poi il resto)
+function Split-IntoDiscs($Files, [long]$Capacity) {
+    $ordered = @($Files | Sort-Object @{ e = { if ($_.category -eq 'Installer') { 0 } else { 1 } } }, path)
+    $discs = New-Object System.Collections.Generic.List[object]
+    $current = New-Object System.Collections.Generic.List[object]
+    $used = 0L
+    foreach ($f in $ordered) {
+        if ([long]$f.size -gt $Capacity) {
+            throw "Il file $($f.path) ($(Format-Size $f.size)) e' piu' grande di un disco: serve un disco piu' capiente"
+        }
+        if ($current.Count -and $used + [long]$f.size -gt $Capacity) {
+            $discs.Add($current.ToArray())
+            $current = New-Object System.Collections.Generic.List[object]
+            $used = 0L
+        }
+        $current.Add($f)
+        $used += [long]$f.size
+    }
+    if ($current.Count) { $discs.Add($current.ToArray()) }
+    return , $discs.ToArray()
+}
 
-    try { Invoke-Burn $burner $Game.Folder $label $erase }
-    catch { Write-Alert "Masterizzazione fallita: $($_.Exception.Message)"; return $null }
-    Write-Ok 'Scrittura completata'
+# Cartella con il contenuto del disco $Number: collegamenti fisici ai file della libreria (nessuna
+# copia, se la libreria e' su NTFS) piu' il manifest con "disc"/"discs" e il disco di ogni file
+function New-DiscStaging($Game, $Manifest, $Plan, [int]$Number) {
+    $staging = Join-Path (Split-Path $Game.Folder) ".sibyl-dischi\$($Game.FolderName)\disco$Number"
+    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    $names = @($Plan[$Number - 1] | ForEach-Object { $_.path }) + @('LEGGIMI.txt')
+    foreach ($rel in $names) {
+        $source = Join-Path $Game.Folder ($rel -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $source)) { continue }
+        $target = Join-Path $staging ($rel -replace '/', '\')
+        [void][IO.Directory]::CreateDirectory((Split-Path $target))
+        if (-not [Sibyl.Native]::CreateHardLink($target, $source, [IntPtr]::Zero)) { Copy-Item -LiteralPath $source -Destination $target }
+    }
+    $copy = $Manifest | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+    $copy | Add-Member -NotePropertyName disc -NotePropertyValue $Number -Force
+    $copy | Add-Member -NotePropertyName discs -NotePropertyValue $Plan.Count -Force
+    $copy.files = @(foreach ($f in $copy.files) {
+        for ($d = 0; $d -lt $Plan.Count; $d++) {
+            if (@($Plan[$d] | ForEach-Object { $_.path }) -contains $f.path) {
+                $f | Add-Member -NotePropertyName disc -NotePropertyValue ($d + 1) -Force
+            }
+        }
+        $f
+    })
+    Write-TextFile (Join-Path $staging $ManifestName) ($copy | ConvertTo-Json -Depth 6)
+    return $staging
+}
 
-    # Dopo la chiusura del disco Windows impiega qualche secondo a rileggerlo
-    $root = $burner.Root
+# Dopo la scrittura: aspetta che Windows rilegga il disco e lo verifica. $true se va bene (o se
+# l'utente salta la verifica), $false se la verifica fallisce e non si vuole continuare.
+function Confirm-BurnedDisc([string]$Root, $Manifest) {
     $deadline = (Get-Date).AddSeconds(60)
     $i = 0
-    while (-not (Test-Path -LiteralPath (Join-Path $root $ManifestName))) {
+    while (-not (Test-Path -LiteralPath (Join-Path $Root $ManifestName))) {
         if ((Get-Date) -gt $deadline) {
             Write-Host ''
             if ((Read-Answer "Windows non vede ancora il disco: estrailo, reinseriscilo e premi INVIO (Q salta la verifica)") -eq 'Q') {
-                return $root
+                return $true
             }
             $deadline = (Get-Date).AddSeconds(60)
         }
@@ -371,23 +572,107 @@ function Invoke-BurnFlow($Game) {
         Start-Sleep -Milliseconds 250
     }
     Write-Host ''
-
     while ($true) {
-        $problems = @(Test-DiscWithProgress $root $manifest)
+        $problems = @(Test-DiscWithProgress $Root $Manifest)
         if (-not $problems.Count) { break }
         Write-Alert "Verifica fallita, $($problems.Count) file con problemi:"
         $problems | ForEach-Object { Write-Info $_ }
         if ((Read-Answer '[V] verifica di nuovo   [INVIO] continua senza disco verificato') -ne 'V') {
             Write-Info 'Se la verifica continua a fallire sullo stesso file, meglio rimasterizzare il disco.'
-            return $null
+            return $false
         }
         Write-Host ''
     }
-    Write-Ok "Disco verificato: $(@($manifest.files).Count) file integri"
-    return $root
+    $disc = Get-DiscNumber $Manifest
+    Write-Ok "Disco verificato: $(@($Manifest.files | Where-Object { (Get-FileDisc $_) -eq $disc }).Count) file integri"
+    return $true
+}
+
+# Masterizza il gioco su uno o piu' dischi e li verifica. Se non entra in un disco lo divide e chiede
+# i dischi successivi uno alla volta; mentre si aspetta un disco [A] annulla. Restituisce la radice
+# del disco (l'ultimo masterizzato), o $null.
+function Invoke-BurnFlow($Game) {
+    $manifest = Read-Manifest (Get-ManifestPath $Game.Folder)
+    Write-Host ''
+    Write-Step "Masterizzazione di $($manifest.title)"
+    $burner = Select-Burner
+    if (-not $burner) { Write-Info 'Masterizzazione saltata.'; return $null }
+
+    $first = Wait-BlankDisc $burner "Inserisci un disco vuoto in $($burner.Root)" 0
+    if (-not $first) { Write-Info 'Masterizzazione annullata.'; return $null }
+
+    # Spazio utile di un disco come questo, meno un margine per manifest e LEGGIMI
+    $capacity = [long]($first.Media.Capacity * $MediaMargin) - 4MB
+    $files = @($manifest.files)
+    try {
+        # $plan e' un elenco di dischi, e ogni disco e' l'elenco dei suoi file
+        if ($Game.TotalBytes -le $capacity) { $plan = @(, $files) } else { $plan = Split-IntoDiscs $files $capacity }
+    } catch {
+        Write-Alert $_.Exception.Message
+        return $null
+    }
+    $count = $plan.Count
+    $title = $manifest.title
+    $baseLabel = Get-VolumeLabel $title
+    if ($count -gt 1 -and $baseLabel.Length -gt 12) { $baseLabel = $baseLabel.Substring(0, 12).TrimEnd('_') }
+
+    Write-Host ''
+    Write-Info "Gioco     : $title  ($(Format-Size $Game.TotalBytes))"
+    Write-Info "Disco     : $($first.Media.Name) in $($burner.Root)  [$($burner.Name)]"
+    if ($count -gt 1) {
+        Write-Alert "Il gioco non entra in un solo $($first.Media.Name): servono $count dischi."
+        for ($n = 1; $n -le $count; $n++) {
+            $bytes = [long]($plan[$n - 1] | ForEach-Object { [long]$_.size } | Measure-Object -Sum).Sum
+            Write-Info ("Disco {0} di {1}: {2} file, {3}" -f $n, $count, @($plan[$n - 1]).Count, (Format-Size $bytes))
+        }
+        Write-Info 'Dopo ogni disco il cassetto si apre: inserisci il successivo e Sibyl continua da solo.'
+    } else {
+        Write-Info "Etichetta : $baseLabel"
+    }
+    if ($first.Erase) { Write-Alert "Il contenuto attuale del disco verra' cancellato." }
+    if (-not (Test-Yes (Read-Answer 'Avvio la masterizzazione? [S/N]'))) { Write-Info 'Masterizzazione annullata.'; return $null }
+
+    $media = $first
+    $stagingRoot = Join-Path (Split-Path $Game.Folder) ".sibyl-dischi\$($Game.FolderName)"
+    try {
+        for ($n = 1; $n -le $count; $n++) {
+            if ($n -gt 1) {
+                Invoke-DriveEject $burner.Root
+                $need = [long]($plan[$n - 1] | ForEach-Object { [long]$_.size } | Measure-Object -Sum).Sum
+                $media = Wait-BlankDisc $burner "Inserisci il disco $n di $count (vuoto) in $($burner.Root)" $need
+                if (-not $media) {
+                    Write-Alert "Masterizzazione interrotta: pronti $($n - 1) dischi su $count."
+                    Write-Info 'Per giocare servono tutti i dischi: rimasterizza il gioco quando vuoi.'
+                    return $null
+                }
+            }
+            if ($count -eq 1) {
+                $folder = $Game.Folder
+                $label = $baseLabel
+                $discManifest = $manifest
+            } else {
+                Write-Host ''
+                Write-Step "Disco $n di $count"
+                $folder = New-DiscStaging $Game $manifest $plan $n
+                $label = "$($baseLabel)_$n"
+                $discManifest = Read-Manifest (Join-Path $folder $ManifestName)
+            }
+            try { Invoke-Burn $burner $folder $label $media.Erase }
+            catch { Write-Alert "Masterizzazione fallita: $($_.Exception.Message)"; return $null }
+            Write-Ok 'Scrittura completata'
+            if (-not (Confirm-BurnedDisc $burner.Root $discManifest)) { return $null }
+        }
+    } finally {
+        Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($count -gt 1) { Write-Ok "Tutti i $count dischi di $title sono pronti" }
+    return $burner.Root
 }
 
 # ================================================================ MAIN
+
+# Permette di caricare le funzioni con ". .\Organize-GogGames.ps1" senza avviare l'organizzatore
+if ($MyInvocation.InvocationName -eq '.') { return }
 
 Write-Banner 'disc prep :: libreria GOG' 'Organizer'
 
@@ -498,8 +783,12 @@ foreach ($e in $entries | Where-Object { $_.Info -and $_.Info.Kind -eq 'Installe
 }
 
 if (-not $games.Count) {
-    Write-Alert 'Nessun installer GOG (setup_*.exe) trovato. Niente da fare.'
-    exit 1
+    if ($DryRun -or $All -or $Select) {
+        Write-Alert 'Nessun installer GOG (setup_*.exe) trovato. Niente da fare.'
+        exit 1
+    }
+    Write-Alert 'Nessun installer GOG (setup_*.exe) trovato.'
+    Write-Info 'Puoi comunque importare un gioco non GOG con [I].'
 }
 
 # ---- tutto il resto: patch, DLC, extra
@@ -521,6 +810,7 @@ foreach ($g in $gameList) {
 
 # ---- scelta del gioco
 $burn = -not ($DryRun -or $All -or $NoBurn)
+$imported = $null   # gioco non GOG importato con [I]: salta l'elaborazione dei download GOG
 if ($DryRun -or $All) {
     $selected = $gameList
 } else {
@@ -529,13 +819,20 @@ if ($DryRun -or $All) {
     } else {
         while ($true) {
             $choice = Show-GameMenu $gameList
-            if ("$choice" -ne 'uninstall') { break }
-            Invoke-UninstallMenu
+            if ("$choice" -eq 'uninstall') { Invoke-UninstallMenu; continue }
+            if ("$choice" -eq 'import') {
+                $imported = Invoke-ImportFlow
+                if ($imported) { break }
+                continue
+            }
+            break
         }
     }
-    if (-not $choice) { Exit-QuitAll $FromMenu }
-    if ("$choice" -eq 'menu') { Exit-ToMenu $FromMenu }
-    if ("$choice" -eq 'all') {
+    if ($imported) {
+        $selected = @()
+    } elseif (-not $choice) { Exit-QuitAll $FromMenu }
+    elseif ("$choice" -eq 'menu') { Exit-ToMenu $FromMenu }
+    elseif ("$choice" -eq 'all') {
         $selected = $gameList
         $burn = $false
     } elseif ($choice -lt 1 -or $choice -gt $gameList.Count) {
@@ -622,6 +919,7 @@ foreach ($g in $selected) {
         platform       = 'windows'
         mode           = $mode            # install = installa dal disco | portable = avvia da Game\
         installer      = $(if ($exes.Count) { $exes[0].Target -replace '\\', '/' } else { '' })
+        installerType  = 'inno'           # gli installer offline di GOG sono tutti Inno Setup
         launch         = $launch          # vuoto = Sibyl lo ricava dal goggame-*.info dopo l'installazione
         sizeBytes      = $totalBytes
         suggestedMedia = $mediaName
@@ -632,29 +930,7 @@ foreach ($g in $selected) {
     # Un solo manifest per cartella: il vecchio timerunner.json, ormai copiato in sibyl.json, si toglie
     Remove-Item -LiteralPath (Join-Path $folder $LegacyManifestName) -ErrorAction SilentlyContinue
 
-    $lines = @(
-        '+==================================================================+'
-        '|   S I B Y L    ::    D I S C O   G I O C O                       |'
-        '+==================================================================+'
-        ''
-        "  Titolo     : $title"
-        "  Versione   : $($g.Version)"
-        "  Build      : $($g.Build)"
-        "  Dimensione : $(Format-Size $totalBytes)"
-        "  Supporto   : $mediaName"
-        "  Preparato  : $((Get-Date).ToString('yyyy-MM-dd'))"
-        ''
-        '  COME SI USA'
-        '  - Con Sibyl: inserisci il disco, il gioco viene riconosciuto'
-        "    da $ManifestName e avviato."
-        '  - Senza Sibyl: apri la cartella Installer ed esegui'
-        "    $(if ($exes.Count) { $exes[0].File.Name } else { 'il setup .exe' })"
-        '    (i file .bin devono restare nella stessa cartella dell''exe).'
-        ''
-        '  CONTENUTO'
-    )
-    $lines += $fileRecords | ForEach-Object { '    {0,-52} {1,10}' -f $_.path, (Format-Size $_.size) }
-    Write-TextFile (Join-Path $folder 'LEGGIMI.txt') (($lines -join "`r`n") + "`r`n")
+    Write-Readme $folder $title $g.Version $g.Build $totalBytes $mediaName 'Installer' $(if ($exes.Count) { $exes[0].File.Name } else { 'il setup .exe' }) $fileRecords
 
     Write-Ok "$title pronto"
     $summary.Add($folderName)
@@ -706,8 +982,9 @@ if (-not $burn) {
 }
 
 # ---- masterizzazione e avvio
-if ($DryRun -or $selected.Count -ne 1) { exit 0 }
-$game = $selected[0]
+if ($imported) { $game = $imported }
+elseif ($DryRun -or $selected.Count -ne 1) { exit 0 }
+else { $game = $selected[0] }
 $discRoot = if ($burn) { Invoke-BurnFlow $game } else { $null }
 
 Write-Host ''

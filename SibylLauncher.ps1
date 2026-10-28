@@ -51,12 +51,6 @@ $PollMs = 1500
 
 # ---------------------------------------------------------------- console
 
-function Read-KeyNow {
-    # Senza una console interattiva (output rediretto) KeyAvailable lancia: niente tasti
-    try { if ([Console]::KeyAvailable) { return [Console]::ReadKey($true) } } catch { }
-    return $null
-}
-
 function Format-Duration([TimeSpan]$Span) {
     if ($Span.TotalHours -ge 1) { return '{0}h {1:00}m' -f [math]::Floor($Span.TotalHours), $Span.Minutes }
     return '{0}m {1:00}s' -f $Span.Minutes, $Span.Seconds
@@ -110,6 +104,17 @@ function Find-Disc {
             Manifest  = Read-Manifest (Get-ManifestPath $root)
         }
     }
+    return $null
+}
+
+# Il disco della sessione e' ancora nel lettore? Va bene anche un altro disco dello stesso gioco
+# (giochi su piu' dischi): in quel caso restituisce quello. $null se il disco non c'e' piu'.
+function Test-DiscStillHere($Disc) {
+    $signature = Get-DiscSignature $Disc.Root
+    if ($signature -eq $Disc.Signature) { return $Disc }
+    if (-not $signature) { return $null }
+    $now = Find-Disc
+    if ($now -and $now.Manifest -and (Test-SameSet $now.Manifest $Disc.Manifest)) { return $now }
     return $null
 }
 
@@ -348,17 +353,155 @@ function Get-InstallerBytes([string]$Exe) {
     return [long]($parts | Measure-Object -Property Length -Sum).Sum
 }
 
-function Install-Game($Disc) {
+# Avvia un installer. Inno Setup, NSIS e MSI si installano in silenzio nella cartella scelta da Sibyl;
+# gli altri tipi (o con -ShowInstaller) si aprono con le loro finestre e l'utente sceglie dove.
+function Start-Installer([string]$Exe, [string]$Type, [string]$Dir, [string]$Log) {
+    $work = Split-Path $Exe
+    if ($Type -eq 'inno') {
+        $silent = if ($ShowInstaller) { '' } else { '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- ' }
+        return Start-Process -FilePath $Exe -ArgumentList "$silent/LOG=`"$Log`" /DIR=`"$Dir`"" -WorkingDirectory $work -PassThru
+    }
+    if ($ShowInstaller -or $Type -notin 'nsis', 'msi') {
+        Write-Info 'Segui l''installazione nella finestra dell''installer.'
+        if ($Type -eq 'msi') { return Start-Process msiexec.exe -ArgumentList "/i `"$Exe`"" -PassThru }
+        return Start-Process -FilePath $Exe -WorkingDirectory $work -PassThru
+    }
+    if ($Type -eq 'nsis') {
+        # /D deve essere l'ultimo parametro e senza virgolette, anche con gli spazi
+        return Start-Process -FilePath $Exe -ArgumentList "/S /D=$Dir" -WorkingDirectory $work -PassThru
+    }
+    return Start-Process msiexec.exe -PassThru -ArgumentList ("/i `"$Exe`" /qn /norestart /L*v `"$Log`" " +
+        "INSTALLDIR=`"$Dir`" INSTALLLOCATION=`"$Dir`" TARGETDIR=`"$Dir`"")
+}
+
+# Se l'installer ha scelto da solo la cartella (o non si sa dove abbia installato), si chiede all'utente
+function Read-InstallDir {
+    Write-Host ''
+    Write-Alert "Non so in quale cartella e' stato installato il gioco."
+    while ($true) {
+        $path = Read-Text 'Cartella in cui e'' stato installato (puoi trascinarla qui)'
+        if (-not $path) { throw 'Installazione non completata: cartella del gioco sconosciuta' }
+        if (Test-Path -LiteralPath $path -PathType Container) { return (Resolve-Path -LiteralPath $path).ProviderPath }
+        Write-Alert "Cartella non trovata: $path"
+    }
+}
+
+# Copia i file di un disco ($Disc) nella cartella $Target, con la barra di avanzamento
+function Copy-DiscFiles($Disc, [string]$Target) {
+    $n = Get-DiscNumber $Disc.Manifest
+    $files = @($Disc.Manifest.files | Where-Object { (Get-FileDisc $_) -eq $n })
+    $total = [long]($files | ForEach-Object { [long]$_.size } | Measure-Object -Sum).Sum
+    $done = 0L
+    $start = Get-Date
+    $label = "Copia disco $n/$(Get-DiscCount $Disc.Manifest)"
+    $buffer = New-Object byte[] (1MB)
+    foreach ($f in $files) {
+        $from = Join-Path $Disc.Root ($f.path -replace '/', '\')
+        $to = Join-Path $Target ($f.path -replace '/', '\')
+        [void][IO.Directory]::CreateDirectory((Split-Path $to))
+        $in = [IO.File]::OpenRead($from)
+        $out = [IO.File]::Create($to)
+        try {
+            while (($read = $in.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $out.Write($buffer, 0, $read)
+                $done += $read
+                Write-ProgressBar $label (100.0 * $done / [math]::Max(1, $total)) ((Get-Date) - $start).ToString('mm\:ss')
+                Update-DiscSpin
+            }
+        } finally { $in.Dispose(); $out.Dispose() }
+    }
+    Write-ProgressBar $label 100 ((Get-Date) - $start).ToString('mm\:ss')
+    Write-Host ''
+}
+
+# Gioco su piu' dischi: aspetta un disco della stessa serie tra quelli che mancano (in qualsiasi
+# ordine). Restituisce il disco, oppure $null se l'utente annulla con [A].
+function Wait-NextDisc($Manifest, [int[]]$Missing) {
+    Show-Screen 'cambio disco'
+    $count = Get-DiscCount $Manifest
+    Write-Box @(
+        ''
+        "*  $($Manifest.title.ToUpper())"
+        ''
+        "  Inserisci il disco $($Missing[0]) di $count"
+        "  Dischi mancanti: $($Missing -join ', ')"
+        ''
+    )
+    Write-Host ''
+    Write-Keys '[A] annulla l''installazione'
+    Write-Host ''
+    $candidate = $null
+    $next = [datetime]::MinValue
+    $tick = 0
+    $message = 'In attesa del disco...'
+    while ($true) {
+        $key = Read-KeyNow
+        if ($key -and "$($key.KeyChar)".ToUpper() -eq 'A') { Write-Host ''; return $null }
+        if ((Get-Date) -ge $next) {
+            $disc = Find-Disc
+            if ($disc -and $disc.Manifest -and (Test-SameSet $disc.Manifest $Manifest)) {
+                $n = Get-DiscNumber $disc.Manifest
+                if ($Missing -contains $n) {
+                    # Come all'inserimento normale: due letture uguali di fila prima di fidarsi
+                    if ($candidate -and $candidate.Signature -eq $disc.Signature) { Write-Host ''; return $disc }
+                    $candidate = $disc
+                } else {
+                    $message = "Il disco $n e' gia' stato copiato: serve il disco $($Missing[0])"
+                }
+            } elseif ($disc) {
+                $message = "Questo disco non fa parte di $($Manifest.title)"
+                $candidate = $null
+            } else {
+                $message = 'In attesa del disco...'
+                $candidate = $null
+            }
+            $next = (Get-Date).AddMilliseconds($PollMs)
+        }
+        Write-Status ('[{0}] {1}' -f $Spinner[$tick++ % 4], (T $message)) $Theme.Accent
+        Start-Sleep -Milliseconds 150
+    }
+}
+
+# Copia sul PC tutti i dischi di un gioco su piu' dischi, partendo da quello inserito.
+# Restituisce l'ultimo disco inserito (ancora nel lettore), oppure $null se annullato.
+function Copy-DiscSet($Disc, [string]$Staging) {
+    $m = $Disc.Manifest
+    $count = Get-DiscCount $m
+    $copied = @{}
+    if (Test-Path -LiteralPath $Staging) { Remove-Item -LiteralPath $Staging -Recurse -Force }
+    [void][IO.Directory]::CreateDirectory($Staging)
+    $current = $Disc
+    while ($true) {
+        Show-Screen 'installazione'
+        Write-Info "$($m.title) e' su $count dischi: vengono copiati sul PC, poi si installa."
+        Write-Host ''
+        Start-DiscSpin
+        Write-Host ''
+        Copy-DiscFiles $current $Staging
+        Stop-DiscSpin
+        $copied[(Get-DiscNumber $current.Manifest)] = $true
+        $missing = @(1..$count | Where-Object { -not $copied.ContainsKey($_) })
+        if (-not $missing.Count) { return $current }
+        Invoke-Eject $current
+        $current = Wait-NextDisc $m $missing
+        if (-not $current) { return $null }
+    }
+}
+
+# Installa il gioco dal disco o, per i giochi su piu' dischi, dalla cartella $SourceRoot in cui sono
+# stati copiati. Le voci di "App installate" prima e dopo dicono dove e' finito, l'exe e come si disinstalla.
+function Install-Game($Disc, [string]$SourceRoot) {
     $m = $Disc.Manifest
     $gameHome = Get-GameHome $m
     $dir = Join-Path $gameHome 'game'
     [void][IO.Directory]::CreateDirectory($dir)
     Start-DiscSpin   # gira sopra le barre finche' l'installer legge dal disco
     Write-Host ''
+    $entry = $null
 
     if ((Get-Prop $m 'mode') -eq 'portable') {
         # Gioco gia' installato sul disco, nella cartella Game\: si copia in locale
-        $src = Join-Path $Disc.Root 'Game'
+        $src = Join-Path $SourceRoot 'Game'
         if (-not (Test-Path -LiteralPath $src)) { throw "Modalita' portable ma sul disco manca la cartella Game\" }
         $bytes = [long](Get-ChildItem -LiteralPath $src -File -Recurse | Measure-Object -Property Length -Sum).Sum
         $p = Start-Process robocopy -ArgumentList "`"$src`" `"$dir`" /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP" -WindowStyle Hidden -PassThru
@@ -370,19 +513,33 @@ function Install-Game($Disc) {
             ForEach-Object { $_.path })
         $installers = @($installers | Where-Object { $_ })
         if (-not $installers.Count) { throw 'Il manifest non indica nessun installer' }
+        $type = Get-Prop $m 'installerType'
+        if (-not $type) { $type = 'inno' }   # dischi GOG preparati prima che il manifest lo dicesse
+        $interactive = $ShowInstaller -or $type -notin 'inno', 'nsis', 'msi'
+        $before = @(Get-UninstallEntries | ForEach-Object { $_.Key })
 
-        $silent = if ($ShowInstaller) { '' } else { '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- ' }
         for ($n = 0; $n -lt $installers.Count; $n++) {
             $rel = $installers[$n]
-            $exe = Join-Path $Disc.Root ($rel -replace '/', '\')
+            $exe = Join-Path $SourceRoot ($rel -replace '/', '\')
             if (-not (Test-Path -LiteralPath $exe)) { throw "Installer mancante sul disco: $rel" }
             $label = if ($installers.Count -gt 1) { "Installazione $($n + 1)/$($installers.Count)" } else { 'Installazione' }
             Write-Info (Split-Path -Leaf $exe)
             $log = Join-Path $gameHome ("install-{0}.log" -f ($n + 1))
             Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
-            $p = Start-Process -FilePath $exe -ArgumentList "$silent/LOG=`"$log`" /DIR=`"$dir`"" -WorkingDirectory (Split-Path $exe) -PassThru
+            # I DLC dei giochi GOG sono Inno Setup come il gioco
+            $p = Start-Installer $exe $(if ($n -gt 0) { 'inno' } else { $type }) $dir $log
             $null = $p.Handle
             Wait-WithProgress $p $label (Get-InstallerBytes $exe)
+            if ($type -eq 'msi' -and $p.ExitCode -notin 0, 1641, 3010) {
+                Write-Host ''
+                Write-Alert "Installazione fallita (codice $($p.ExitCode)): $(T 'errore sconosciuto')"
+                Write-Info "Log completo: $log"
+                throw "Installazione di $(Split-Path -Leaf $exe) non completata"
+            }
+            if ($type -eq 'nsis' -and -not $interactive -and $p.ExitCode -ne 0) {
+                throw "Installazione di $(Split-Path -Leaf $exe) non completata"
+            }
+            if ($type -ne 'inno') { continue }
             if ($p.ExitCode -ne 0 -and (Test-InstallLogSucceeded $log)) {
                 Write-Info "L'installer si e' chiuso con un errore (codice $($p.ExitCode)) ma il suo log dice che l'installazione e' riuscita."
             } elseif ($p.ExitCode -ne 0) {
@@ -400,26 +557,70 @@ function Install-Game($Disc) {
                 throw "Installazione di $(Split-Path -Leaf $exe) non completata"
             }
         }
+
+        # La voce nuova in "App installate": quella nella cartella di Sibyl, o col nome del gioco, o l'unica
+        $new = @(Get-UninstallEntries | Where-Object { $before -notcontains $_.Key })
+        $entry = $new | Where-Object { $_.InstallLocation -and $_.InstallLocation.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) } |
+            Select-Object -First 1
+        if (-not $entry) {
+            $word = ($m.title -split '\W+' | Where-Object { $_.Length -gt 2 } | Select-Object -First 1)
+            if ($word) { $entry = $new | Where-Object { $_.Name -and $_.Name -like "*$word*" } | Select-Object -First 1 }
+        }
+        if (-not $entry -and $new.Count -eq 1) { $entry = $new[0] }
+
+        # Installer con le finestre, o cartella di Sibyl rimasta vuota: il gioco e' altrove, lo dice il registro
+        if ($interactive -or -not (Get-ChildItem -LiteralPath $dir -Force | Select-Object -First 1)) {
+            $location = $null
+            if ($entry) {
+                $location = $entry.InstallLocation
+                if (-not $location) { $icon = Get-ExeFromIcon $entry.DisplayIcon; if ($icon) { $location = Split-Path $icon } }
+            }
+            if ($location -and (Test-Path -LiteralPath $location)) { $dir = $location.TrimEnd('\') }
+            else { Stop-DiscSpin; $dir = Read-InstallDir }
+        }
     }
 
     Stop-DiscSpin
     $old = Read-State $m
     $state = [pscustomobject]@{
-        id          = $m.id
-        title       = $m.title
-        version     = $m.version
-        build       = $m.build
-        installDir  = $dir
-        installedAt = (Get-Date).ToString('s')
-        playSeconds = $(if ($old) { [long](Get-Prop $old 'playSeconds') } else { 0 })
-        lastPlayed  = $(if ($old) { Get-Prop $old 'lastPlayed' } else { '' })
+        id              = $m.id
+        title           = $m.title
+        version         = $m.version
+        build           = $m.build
+        installDir      = $dir
+        installedAt     = (Get-Date).ToString('s')
+        playSeconds     = $(if ($old) { [long](Get-Prop $old 'playSeconds') } else { 0 })
+        lastPlayed      = $(if ($old) { Get-Prop $old 'lastPlayed' } else { '' })
+        launchExe       = $(if ($old) { Get-Prop $old 'launchExe' } else { '' })
+        displayIcon     = $(if ($entry) { Get-ExeFromIcon $entry.DisplayIcon } else { '' })
+        uninstallString = $(if ($entry) { $entry.Uninstall } else { '' })
+        quietUninstall  = $(if ($entry) { $entry.QuietUninstall } else { '' })
     }
     Save-State $m $state
     return $state
 }
 
-# Ordine: launch del manifest (scelta manuale) > goggame-*.info scritto da GOG > exe piu' grande
-function Resolve-LaunchTarget($Manifest, [string]$Dir) {
+# Quale exe avvia il gioco, chiesto all'utente quando non si riesce a capirlo da soli
+function Select-LaunchExe([string]$Dir, $Candidates) {
+    Write-Host ''
+    Write-Step 'Quale di questi file avvia il gioco?'
+    for ($i = 0; $i -lt $Candidates.Count; $i++) {
+        Write-Host ('   [{0}]  ' -f ($i + 1)) -ForegroundColor $Theme.Accent -NoNewline
+        Write-Host $Candidates[$i].FullName.Substring($Dir.TrimEnd('\').Length + 1) -ForegroundColor $Theme.Text
+    }
+    while ($true) {
+        $answer = Read-Answer 'Numero   [INVIO] = 1'
+        if (-not $answer) { return $Candidates[0].FullName }
+        $n = 0
+        if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $Candidates.Count) { return $Candidates[$n - 1].FullName }
+        Write-Alert "Scrivi un numero da 1 a $($Candidates.Count)"
+    }
+}
+
+# Ordine: launch del manifest (scelta manuale) > exe scelto la volta scorsa > goggame-*.info di GOG >
+# icona registrata dall'installer > unico exe adatto > domanda all'utente (la risposta resta in $State)
+function Resolve-LaunchTarget($Manifest, $State) {
+    $Dir = $State.installDir
     $launch = Get-Prop $Manifest 'launch'
     if ((Get-Prop $launch 'exe')) {
         $wd = Get-Prop $launch 'workingDir'
@@ -429,6 +630,9 @@ function Resolve-LaunchTarget($Manifest, [string]$Dir) {
             WorkingDir = $(if ($wd) { Join-Path $Dir $wd } else { '' })
         }
     }
+
+    $saved = Get-Prop $State 'launchExe'
+    if ($saved -and (Test-Path -LiteralPath $saved)) { return [pscustomobject]@{ Exe = $saved; Args = ''; WorkingDir = '' } }
 
     foreach ($info in Get-ChildItem -LiteralPath $Dir -Filter 'goggame-*.info' -File -ErrorAction SilentlyContinue) {
         $json = Read-Manifest $info.FullName
@@ -444,11 +648,18 @@ function Resolve-LaunchTarget($Manifest, [string]$Dir) {
         }
     }
 
-    $exe = Get-ChildItem -LiteralPath $Dir -Filter *.exe -File -Recurse -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notmatch '^(unins|setup|dxsetup|vc_?redist|dotnet|oalinst|crash|ue4prereq|directx)' } |
-        Sort-Object Length -Descending | Select-Object -First 1
-    if ($exe) { return [pscustomobject]@{ Exe = $exe.FullName; Args = ''; WorkingDir = '' } }
-    return $null
+    $icon = Get-Prop $State 'displayIcon'
+    if ($icon -and (Test-Path -LiteralPath $icon) -and (Split-Path -Leaf $icon) -notmatch '^(unins|uninst)') {
+        return [pscustomobject]@{ Exe = $icon; Args = ''; WorkingDir = '' }
+    }
+
+    $candidates = @(Get-ChildItem -LiteralPath $Dir -Filter *.exe -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '^(unins|uninst|setup|dxsetup|vc_?redist|dotnet|oalinst|crash|ue4prereq|directx)' } |
+        Sort-Object Length -Descending | Select-Object -First 9)
+    if (-not $candidates.Count) { return $null }
+    $exe = if ($candidates.Count -eq 1) { $candidates[0].FullName } else { Select-LaunchExe $Dir $candidates }
+    $State | Add-Member -NotePropertyName launchExe -NotePropertyValue $exe -Force
+    return [pscustomobject]@{ Exe = $exe; Args = ''; WorkingDir = '' }
 }
 
 function Start-Game($Target, [string]$Dir) {
@@ -486,7 +697,8 @@ function Test-Disc($Disc) {
         Write-Alert "$($bad.Count) file con problemi:"
         $bad | ForEach-Object { Write-Info $_ }
     } else {
-        Write-Ok "Disco integro: $(@($Disc.Manifest.files).Count) file verificati"
+        $n = Get-DiscNumber $Disc.Manifest
+        Write-Ok "Disco integro: $(@($Disc.Manifest.files | Where-Object { (Get-FileDisc $_) -eq $n }).Count) file verificati"
     }
     Write-Host ''
     Write-Keys '[un tasto qualsiasi] torna al disco'
@@ -503,16 +715,16 @@ function Show-Card($Disc, $State) {
               elseif ($State.version -ne $m.version) { "AGGIORNAMENTO: $($State.version) -> $($m.version)" }
               else { 'INSTALLATO' }
     $played = if ($State -and (Get-Prop $State 'playSeconds')) { Format-Duration ([TimeSpan]::FromSeconds($State.playSeconds)) } else { '-' }
-    Write-Box @(
+    $lines = @(
         ''
         "*  $($m.title.ToUpper())"
         ''
         "  Versione     : $(if ($m.version) { $m.version } else { '?' })"
         "  Lettore      : $($Disc.Root)   (disco: $($Disc.Label))"
-        "  Stato        : $status"
-        "  Tempo giocato: $played"
-        ''
     )
+    if ((Get-DiscCount $m) -gt 1) { $lines += "  Disco        : $(Get-DiscNumber $m) di $(Get-DiscCount $m)" }
+    $lines += @("  Stato        : $status", "  Tempo giocato: $played", '')
+    Write-Box $lines
     Write-Host ''
     Write-Keys '[INVIO] gioca   [V] verifica disco   [R] reinstalla   [U] disinstalla'
     Write-Keys '[E] espelli   [M] menu principale   [Q] spegni'
@@ -568,29 +780,47 @@ function Invoke-DiscSession($Disc) {
             continue
         }
 
-        # Si installa e si gioca solo se nel lettore c'e' ancora proprio questo disco
-        # (dopo "gioca ancora" o con il conto alla rovescia a zero il disco potrebbe essere cambiato)
-        if ((Get-DiscSignature $Disc.Root) -ne $Disc.Signature) {
+        # Si installa e si gioca solo se nel lettore c'e' ancora questo disco, o un altro dello stesso
+        # gioco (dopo "gioca ancora" o con il conto alla rovescia a zero il disco potrebbe essere cambiato)
+        $here = Test-DiscStillHere $Disc
+        if (-not $here) {
             Write-Host ''
             Write-Alert "Nel lettore non c'e' piu' il disco di $($m.title): non lo avvio."
             Start-Sleep -Seconds 3
             return ''
         }
+        $Disc = $here
 
+        $staging = $null
         try {
             if ($choice -eq 'reinstall' -or -not $state -or $state.version -ne $m.version -or
                 -not (Test-Path -LiteralPath $state.installDir)) {
+                $source = $Disc.Root
+                if ((Get-DiscCount $m) -gt 1) {
+                    # Gioco su piu' dischi: prima si copiano tutti sul PC, poi si installa da li'
+                    $staging = Join-Path (Get-GameHome $m) '_dischi'
+                    $last = Copy-DiscSet $Disc $staging
+                    if (-not $last) {
+                        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+                        Write-Info 'Installazione annullata.'
+                        Start-Sleep -Seconds 2
+                        return ''
+                    }
+                    $Disc = $last
+                    $source = $staging
+                }
                 Show-Screen 'installazione'
                 Write-Info "$($m.title) viene installato in $(Get-GameHome $m)"
                 Write-Info 'Solo al primo inserimento: le volte successive parte subito.'
                 Write-Host ''
-                $state = Install-Game $Disc
+                $state = Install-Game $Disc $source
                 Write-Ok 'Installazione completata'
             }
-            $target = Resolve-LaunchTarget $m $state.installDir
+            $target = Resolve-LaunchTarget $m $state
             if (-not $target -or -not (Test-Path -LiteralPath $target.Exe)) {
                 throw "Non trovo l'eseguibile del gioco. Indicalo in launch.exe dentro $ManifestName"
             }
+            Save-State $m $state   # ricorda l'exe scelto
         } catch {
             Write-Host ''
             Write-Alert $_.Exception.Message
@@ -599,6 +829,9 @@ function Invoke-DiscSession($Disc) {
             if ($r -in 'quit', 'menu') { return $r }
             if ($r -eq 'replay') { continue }
             return ''
+        } finally {
+            # La copia dei dischi serve solo all'installazione
+            if ($staging) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue }
         }
 
         Show-Screen 'in gioco'
