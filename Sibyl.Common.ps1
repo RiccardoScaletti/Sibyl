@@ -2,7 +2,7 @@
 # e il launcher (SibylLauncher.ps1)
 
 # Versione di Sibyl: compare nel menu principale e nelle proprieta' di Sibyl.exe (Build-SibylExe.ps1)
-$SibylVersion = '1.2'
+$SibylVersion = '1.2.1'
 
 $ManifestName = 'sibyl.json'
 $LegacyManifestName = 'timerunner.json'   # dischi preparati quando il programma si chiamava TimeRunner
