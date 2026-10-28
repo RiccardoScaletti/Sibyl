@@ -159,33 +159,37 @@ function Wait-DiscChange($Disc, [string]$Prompt, [switch]$AllowReplay) {
 
 # ---------------------------------------------------------------- schermata d'attesa
 
-# Disco appena inserito: un paio di secondi di disco che gira mentre il lettore lo legge
-function Show-DiscReading {
-    Show-Screen 'lettura disco'
+# Disco appena inserito (o gioco scelto tra quelli installati, con -Memory): un paio di secondi di
+# disco che gira mentre il lettore lo legge
+function Show-DiscReading([switch]$Memory) {
+    Show-Screen $(if ($Memory) { 'lettura memoria' } else { 'lettura disco' })
     Write-Host ''
     Start-DiscSpin
     Write-Host ''
+    $text = if ($Memory) { 'lettura dei giochi in memoria in corso...' } else { 'lettura del disco in corso...' }
     $until = (Get-Date).AddSeconds(2)
     $tick = 0
     while ((Get-Date) -lt $until) {
         Update-DiscSpin
-        Write-Status ('                  [{0}]  lettura del disco in corso...' -f $Spinner[$tick++ % 4]) $Theme.Accent
+        Write-Status ('                  [{0}]  {1}' -f $Spinner[$tick++ % 4], (T $text)) $Theme.Accent
         Start-Sleep -Milliseconds 50
     }
     Stop-DiscSpin
     Write-Host ''
 }
 
-# Restituisce il disco trovato, oppure 'menu' / 'quit'
+# Restituisce il disco trovato, oppure 'library' (gioca senza disco) / 'menu' / 'quit'
 function Wait-ForDisc {
     Show-Screen 'pronto'
     $roots = @(Get-DiscRoots)
     if ($roots.Count) { Write-Info "Lettori: $($roots -join '  ')" }
     else { Write-Alert 'Nessun lettore ottico trovato: collega il masterizzatore, resto in attesa.' }
+    $installed = @(Get-InstalledGames $Library).Count
+    if ($installed) { Write-Info "Giochi installati: $installed   ([L] per giocare senza disco)" }
     Write-Host ''
     Write-DiscFrame 0
     Write-Host ''
-    Write-Keys '                       [M] menu principale   [Q] spegni'
+    Write-Keys '        [L] gioca senza disco   [M] menu principale   [Q] spegni'
     Write-Host ''
 
     $blink = $true
@@ -196,6 +200,7 @@ function Wait-ForDisc {
         $key = Read-KeyNow
         if ($key -and "$($key.KeyChar)".ToUpper() -eq 'Q') { Write-Host ''; return 'quit' }
         if ($key -and "$($key.KeyChar)".ToUpper() -eq 'M') { Write-Host ''; return 'menu' }
+        if ($key -and "$($key.KeyChar)".ToUpper() -eq 'L') { Write-Host ''; return 'library' }
         if ((Get-Date) -ge $nextBlink) {
             $color = if ($blink) { $Theme.Title } else { $Theme.Accent }
             Write-Status '                >>>   INSERISCI UN DISCO   <<<' $color
@@ -628,7 +633,9 @@ function Resolve-LaunchTarget($Manifest, $State) {
     }
 
     $saved = Get-Prop $State 'launchExe'
-    if ($saved -and (Test-Path -LiteralPath $saved)) { return [pscustomobject]@{ Exe = $saved; Args = ''; WorkingDir = '' } }
+    if ($saved -and (Test-Path -LiteralPath $saved)) {
+        return [pscustomobject]@{ Exe = $saved; Args = (Get-Prop $State 'launchArgs'); WorkingDir = (Get-Prop $State 'launchWorkingDir') }
+    }
 
     foreach ($info in Get-ChildItem -LiteralPath $Dir -Filter 'goggame-*.info' -File -ErrorAction SilentlyContinue) {
         $json = Read-Manifest $info.FullName
@@ -816,7 +823,11 @@ function Invoke-DiscSession($Disc) {
             if (-not $target -or -not (Test-Path -LiteralPath $target.Exe)) {
                 throw "Non trovo l'eseguibile del gioco. Indicalo in launch.exe dentro $ManifestName"
             }
-            Save-State $m $state   # ricorda l'exe scelto
+            # Si ricorda come si avvia il gioco: serve per giocare anche senza disco
+            $state | Add-Member -NotePropertyName launchExe -NotePropertyValue $target.Exe -Force
+            $state | Add-Member -NotePropertyName launchArgs -NotePropertyValue $target.Args -Force
+            $state | Add-Member -NotePropertyName launchWorkingDir -NotePropertyValue $target.WorkingDir -Force
+            Save-State $m $state
         } catch {
             Write-Host ''
             Write-Alert $_.Exception.Message
@@ -856,6 +867,121 @@ function Invoke-DiscSession($Disc) {
     }
 }
 
+# ---------------------------------------------------------------- giochi senza disco
+
+# Elenco dei giochi installati: restituisce quello scelto, o $null per tornare all'attesa del disco
+function Select-InstalledGame {
+    Show-Screen 'giochi installati'
+    $games = @(Get-InstalledGames $Library | Sort-Object Title)
+    if (-not $games.Count) {
+        Write-Info 'Nessun gioco installato: inserisci un disco per installarne uno.'
+        Start-Sleep -Seconds 3
+        return $null
+    }
+    Write-Box @('*SCEGLI IL GIOCO')
+    for ($i = 0; $i -lt $games.Count; $i++) {
+        $played = Format-Duration ([TimeSpan]::FromSeconds([long](Get-Prop $games[$i].State 'playSeconds')))
+        Write-Host ('   [{0,2}]  ' -f ($i + 1)) -ForegroundColor $Theme.Accent -NoNewline
+        Write-Host ('{0,-44} ' -f $games[$i].Title) -ForegroundColor $Theme.Text -NoNewline
+        Write-Host $played -ForegroundColor $Theme.Muted
+    }
+    Write-Host ''
+    while ($true) {
+        $answer = Read-Answer 'Numero del gioco   [INVIO] = torna all''attesa del disco'
+        if (-not $answer) { return $null }
+        $n = 0
+        if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $games.Count) { return $games[$n - 1] }
+        Write-Alert "Scrivi un numero da 1 a $($games.Count)"
+    }
+}
+
+function Show-LibraryCard($State) {
+    Show-Screen 'gioco installato'
+    $played = Format-Duration ([TimeSpan]::FromSeconds([long](Get-Prop $State 'playSeconds')))
+    Write-Box @(
+        ''
+        "*  $($State.title.ToUpper())"
+        ''
+        "  Versione     : $(if (Get-Prop $State 'version') { $State.version } else { '?' })"
+        "  Origine      : $(T 'memoria (senza disco)')"
+        "  Stato        : INSTALLATO"
+        "  Tempo giocato: $played"
+        ''
+    )
+    Write-Host ''
+    Write-Keys '[INVIO] gioca   [U] disinstalla   [B] torna all''elenco'
+    Write-Keys '[M] menu principale   [Q] spegni'
+    Write-Host ''
+}
+
+# Gioca con un gioco gia' installato, senza disco: scelta dall'elenco, lettura "dalla memoria",
+# scheda, partita. Restituisce 'menu' / 'quit', oppure '' per tornare all'attesa del disco.
+function Invoke-LibrarySession {
+    while ($true) {
+        $game = Select-InstalledGame
+        if (-not $game) { return '' }
+        Show-DiscReading -Memory
+        $playNow = $false
+        while ($true) {
+            $state = Read-GameState $game.Home
+            if (-not $state) { break }   # appena disinstallato: si torna all'elenco
+            if (-not $playNow) {
+                Show-LibraryCard $state
+                $choice = Read-KeyChoice @('ENTER', 'U', 'B', 'M', 'Q') 'B'
+                if ($choice -eq 'M') { return 'menu' }
+                if ($choice -eq 'Q') { return 'quit' }
+                if ($choice -eq 'B') { break }
+                if ($choice -eq 'U') {
+                    Show-Screen 'disinstallazione'
+                    [void](Invoke-UninstallScreen $state.title $game.Home $state $Library)
+                    continue
+                }
+            }
+            $playNow = $false
+
+            # Senza disco non c'e' il manifest: l'exe e' quello ricordato (o ritrovato) nello stato
+            try {
+                $target = Resolve-LaunchTarget ([pscustomobject]@{ title = $state.title }) $state
+                if (-not $target -or -not (Test-Path -LiteralPath $target.Exe)) {
+                    throw "Non trovo l'eseguibile del gioco: reinstallalo dal suo disco."
+                }
+            } catch {
+                Write-Host ''
+                Write-Alert $_.Exception.Message
+                Start-Sleep -Seconds 3
+                continue
+            }
+
+            Show-Screen 'in gioco'
+            Write-Box @('', "*  $($state.title.ToUpper())", '', "  $(Split-Path -Leaf $target.Exe)", '') $Theme.Accent
+            Write-Host ''
+            $session = Start-Game $target $state.installDir
+            $state | Add-Member -NotePropertyName launchExe -NotePropertyValue $target.Exe -Force
+            $state.playSeconds = [long](Get-Prop $state 'playSeconds') + [long]$session.TotalSeconds
+            $state | Add-Member -NotePropertyName lastPlayed -NotePropertyValue (Get-Date).ToString('s') -Force
+            Write-TextFile (Join-Path $game.Home 'state.json') ($state | ConvertTo-Json)
+
+            Show-Screen 'partita terminata'
+            Write-Box @(
+                ''
+                "*  $($state.title.ToUpper())"
+                ''
+                "  Questa sessione: $(Format-Duration $session)"
+                "  Tempo totale   : $(Format-Duration ([TimeSpan]::FromSeconds($state.playSeconds)))"
+                ''
+            )
+            if ($Once) { return 'quit' }
+            Write-Host ''
+            Write-Keys '[INVIO] gioca ancora   [B] torna all''elenco   [M] menu principale   [Q] spegni'
+            $after = Read-KeyChoice @('ENTER', 'B', 'M', 'Q') 'B'
+            if ($after -eq 'M') { return 'menu' }
+            if ($after -eq 'Q') { return 'quit' }
+            if ($after -eq 'B') { break }
+            $playNow = $true
+        }
+    }
+}
+
 # ================================================================ MAIN
 
 # Permette di caricare le funzioni con ". .\SibylLauncher.ps1" senza avviare la console
@@ -875,6 +1001,11 @@ if (-not $Library) { $Library = Select-Library }
 $action = 'quit'
 while ($true) {
     $disc = Wait-ForDisc
+    if ($disc -eq 'library') {
+        $r = Invoke-LibrarySession
+        if ($r) { $action = $r; break }
+        continue
+    }
     if ($disc -is [string]) { $action = $disc; break }
 
     if (-not $disc.Manifest) {

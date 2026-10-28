@@ -304,6 +304,21 @@ $TranslationsEn = [ordered]@{
 
 
 
+    # ---- giochi senza disco
+    'lettura memoria'                             = 'reading memory'
+    'lettura dei giochi in memoria in corso...'   = 'reading the games in memory...'
+    'lettura del disco in corso...'               = 'reading the disc...'
+    'Giochi installati: {0}   ([L] per giocare senza disco)' = 'Installed games: {0}   ([L] to play without a disc)'
+    '[L] gioca senza disco   [M] menu principale   [Q] spegni' = '[L] play without a disc   [M] main menu   [Q] power off'
+    'Nessun gioco installato: inserisci un disco per installarne uno.' = 'No games installed: insert a disc to install one.'
+    "Numero del gioco   [INVIO] = torna all'attesa del disco" = 'Game number   [ENTER] = back to waiting for a disc'
+    'gioco installato'                            = 'installed game'
+    'Origine      : {0}'                          = 'Source       : {0}'
+    'memoria (senza disco)'                       = 'memory (no disc)'
+    "[INVIO] gioca   [U] disinstalla   [B] torna all'elenco" = '[ENTER] play   [U] uninstall   [B] back to the list'
+    "Non trovo l'eseguibile del gioco: reinstallalo dal suo disco." = 'Cannot find the game executable: reinstall it from its disc.'
+    "[INVIO] gioca ancora   [B] torna all'elenco   [M] menu principale   [Q] spegni" = '[ENTER] play again   [B] back to the list   [M] main menu   [Q] power off'
+
     # ---- build
 
 
