@@ -96,7 +96,11 @@ Write-Info "Build: $buildId"
 $work = Join-Path $env:TEMP 'Sibyl-build'
 [void][IO.Directory]::CreateDirectory($work)
 $source = Join-Path $work 'Sibyl.Exe.cs'
-Write-TextFile $source ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Sibyl.Exe.cs')).Replace('@BUILD_ID@', $buildId))
+# Versione di Sibyl.Common.ps1 (es. 1.1) nel formato a quattro numeri delle proprieta' dell'exe: 1.1.0.0
+$assemblyVersion = (("$SibylVersion.0.0.0" -split '\.')[0..3]) -join '.'
+Write-Info "Versione: $SibylVersion"
+$code = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Sibyl.Exe.cs'))
+Write-TextFile $source $code.Replace('@BUILD_ID@', $buildId).Replace('@VERSION@', $assemblyVersion)
 
 $dist = Join-Path $PSScriptRoot 'dist'
 [void][IO.Directory]::CreateDirectory($dist)

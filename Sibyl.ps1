@@ -55,6 +55,9 @@ function Show-Menu {
     Write-Paragraph $Description
     Write-Host ''
     Write-Keys 'Premi [1], [2], [3] oppure [Q]'
+    Write-Host ''
+    $version = (T 'versione {0}') -f $SibylVersion
+    Write-Host ((' ' * (68 - $version.Length)) + $version) -ForegroundColor $Theme.Faint
 }
 
 function Show-LaunchOptions {

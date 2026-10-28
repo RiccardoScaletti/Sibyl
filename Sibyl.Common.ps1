@@ -1,6 +1,9 @@
 # Sibyl :: funzioni condivise tra il menu (Sibyl.ps1), Disc Prep (Organize-GogGames.ps1)
 # e il launcher (SibylLauncher.ps1)
 
+# Versione di Sibyl: compare nel menu principale e nelle proprieta' di Sibyl.exe (Build-SibylExe.ps1)
+$SibylVersion = '1.1'
+
 $ManifestName = 'sibyl.json'
 $LegacyManifestName = 'timerunner.json'   # dischi preparati quando il programma si chiamava TimeRunner
 $ConfigPath = Join-Path $env:APPDATA 'Sibyl\config.json'

@@ -39,6 +39,7 @@ $TranslationsEn = [ordered]@{
     '[Q]  esci'                                   = '[Q]  exit'
     'Premi [1], [2], [3] oppure [Q]'              = 'Press [1], [2], [3] or [Q]'
     'Sibyl trasforma i tuoi giochi GOG senza DRM in dischi fisici, da usare come le cartucce di una vecchia console: inserisci il disco e il gioco parte. L''Organizer prepara, masterizza e verifica i dischi; il Launcher li riconosce, installa il gioco e lo avvia.' = 'Sibyl turns your DRM-free GOG games into physical discs, used like the cartridges of an old console: insert the disc and the game starts. The Organizer prepares, burns and checks the discs; the Launcher recognizes them, installs the game and runs it.'
+    'versione {0}'                                = 'version {0}'
     'Grazie per aver usato Sibyl. A presto!' = 'Thanks for using Sibyl. See you soon!'
     'opzioni'                                     = 'options'
     'Lingua / Language'                           = 'Language / Lingua'

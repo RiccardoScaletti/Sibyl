@@ -18,8 +18,9 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Sibyl")]
 [assembly: AssemblyDescription("Sibyl - preserve memories")]
 [assembly: AssemblyProduct("Sibyl")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("@VERSION@")]
+[assembly: AssemblyFileVersion("@VERSION@")]
+[assembly: AssemblyInformationalVersion("@VERSION@")]
 
 static class Program
 {
