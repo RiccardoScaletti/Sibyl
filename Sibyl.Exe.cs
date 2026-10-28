@@ -1,6 +1,6 @@
 // Sibyl.exe :: contenitore. Porta dentro di se' gli script PowerShell di Sibyl, li estrae in
 // %LOCALAPPDATA%\Sibyl\app\<build> e li esegue in una finestra della console classica (conhost),
-// l'unica che Sibyl puo' ridimensionare a 700x700: Windows Terminal non lo permette.
+// l'unica che Sibyl puo' ridimensionare a 800x700: Windows Terminal non lo permette.
 // Si compila con Build-SibylExe.ps1, che sostituisce @BUILD_ID@ e incorpora gli script.
 //
 //   Sibyl.exe                       menu principale

@@ -308,7 +308,7 @@ $TranslationsEn = [ordered]@{
     'lettura memoria'                             = 'reading memory'
     'lettura dei giochi in memoria in corso...'   = 'reading the games in memory...'
     'lettura del disco in corso...'               = 'reading the disc...'
-    'Giochi installati: {0}   ([L] per giocare senza disco)' = 'Installed games: {0}   ([L] to play without a disc)'
+    'Lettori: {0}   Giochi installati: {1}' = 'Drives: {0}   Installed games: {1}'
     '[L] gioca senza disco   [M] menu principale   [Q] spegni' = '[L] play without a disc   [M] main menu   [Q] power off'
     'Nessun gioco installato: inserisci un disco per installarne uno.' = 'No games installed: insert a disc to install one.'
     "Numero del gioco   [INVIO] = torna all'attesa del disco" = 'Game number   [ENTER] = back to waiting for a disc'

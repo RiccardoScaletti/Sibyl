@@ -248,7 +248,7 @@ function Read-Folder([string]$Prompt, [switch]$AllowEmpty) {
 # Sceglie un elemento da un elenco numerato; INVIO = $Default (o $null se non c'e')
 function Read-NumberChoice([string]$Prompt, [int]$Count, [int]$Default = 0) {
     while ($true) {
-        $answer = Read-Answer $Prompt
+        $answer = Read-Pick $Prompt $Count
         if (-not $answer) { if ($Default) { return $Default }; return $null }
         $n = 0
         if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $Count) { return $n }
@@ -296,7 +296,7 @@ function Invoke-ImportFlow {
     $installer = $null
     $installerType = ''
     while ($true) {
-        $answer = Read-Answer 'Scegli l''installer (numero), P oppure INVIO per annullare'
+        $answer = Read-Pick 'Scegli l''installer (numero), P oppure INVIO per annullare' $installers.Count @('P')
         if (-not $answer) { return $null }
         if ($answer -eq 'P') { $portable = $true; break }
         $n = 0
@@ -397,7 +397,7 @@ function Show-GameMenu($List) {
     Write-Keys ' [ Q]  esci'
     Write-Host ''
     while ($true) {
-        $answer = Read-Answer 'Scegli il gioco'
+        $answer = Read-Pick 'Scegli il gioco' $List.Count @('T', 'I', 'D', 'M', 'Q')
         if ($answer -eq 'Q') { return $null }
         if ($answer -eq 'M') { return 'menu' }
         if ($answer -eq 'D') { return 'uninstall' }
@@ -423,7 +423,7 @@ function Invoke-UninstallMenu {
     }
     Write-Host ''
     while ($true) {
-        $answer = Read-Answer 'Quale gioco disinstallare? (numero, INVIO per annullare)'
+        $answer = Read-Pick 'Quale gioco disinstallare? (numero, INVIO per annullare)' $installed.Count
         if (-not $answer) { return }
         $n = 0
         if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $installed.Count) { break }
@@ -443,7 +443,7 @@ function Select-Burner {
         }
         if ($burners.Count -gt 1) {
             for ($i = 0; $i -lt $burners.Count; $i++) { Write-Info ('[{0}] {1}  {2}' -f ($i + 1), $burners[$i].Root, $burners[$i].Name) }
-            $answer = Read-Answer 'Quale masterizzatore? (numero, Q per saltare)'
+            $answer = Read-Pick 'Quale masterizzatore? (numero, Q per saltare)' $burners.Count @('Q')
             if ($answer -eq 'Q') { return $null }
             $n = 0
             if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $burners.Count) { return $burners[$n - 1] }
@@ -451,7 +451,7 @@ function Select-Burner {
         }
 
         Write-Alert 'Nessun masterizzatore rilevato.'
-        $answer = Read-Answer "Lettera dell'unita' (es. E), INVIO per cercare di nuovo, Q per saltare"
+        $answer = Read-Pick "Lettera dell'unita' (es. E), INVIO per cercare di nuovo, Q per saltare" 0 @([char[]](65..90) | ForEach-Object { "$_" })
         if ($answer -eq 'Q') { return $null }
         if ($answer -match '^([A-Z]):?\\?$') {
             $letter = $Matches[1]
@@ -481,7 +481,7 @@ function Wait-BlankDisc($Burner, [string]$Prompt, [long]$MinBytes) {
             if ($media.State -eq 'erasable' -and $big) {
                 Write-Host ''
                 Write-Alert "Il disco $($media.Name) in $($Burner.Root) contiene gia' dati."
-                if (Test-Yes (Read-Answer 'Cancellarlo e riscriverlo? [S/N]')) { return @{ Media = $media; Erase = $true } }
+                if (Test-Yes (Read-Pick 'Cancellarlo e riscriverlo? [S/N]' 0 @('S', 'N'))) { return @{ Media = $media; Erase = $true } }
                 Invoke-DriveEject $Burner.Root
                 Write-Keys "$Prompt   [A] annulla"
             }
@@ -556,7 +556,7 @@ function Confirm-BurnedDisc([string]$Root, $Manifest) {
     while (-not (Test-Path -LiteralPath (Join-Path $Root $ManifestName))) {
         if ((Get-Date) -gt $deadline) {
             Write-Host ''
-            if ((Read-Answer "Windows non vede ancora il disco: estrailo, reinseriscilo e premi INVIO (Q salta la verifica)") -eq 'Q') {
+            if ((Read-Pick "Windows non vede ancora il disco: estrailo, reinseriscilo e premi INVIO (Q salta la verifica)" 0 @('Q')) -eq 'Q') {
                 return $true
             }
             $deadline = (Get-Date).AddSeconds(60)
@@ -577,7 +577,7 @@ function Confirm-BurnedDisc([string]$Root, $Manifest) {
         if (-not $problems.Count) { break }
         Write-Alert "Verifica fallita, $($problems.Count) file con problemi:"
         $problems | ForEach-Object { Write-Info $_ }
-        if ((Read-Answer '[V] verifica di nuovo   [INVIO] continua senza disco verificato') -ne 'V') {
+        if ((Read-Pick '[V] verifica di nuovo   [INVIO] continua senza disco verificato' 0 @('V')) -ne 'V') {
             Write-Info 'Se la verifica continua a fallire sullo stesso file, meglio rimasterizzare il disco.'
             return $false
         }
@@ -630,7 +630,7 @@ function Invoke-BurnFlow($Game) {
         Write-Info "Etichetta : $baseLabel"
     }
     if ($first.Erase) { Write-Alert "Il contenuto attuale del disco verra' cancellato." }
-    if (-not (Test-Yes (Read-Answer 'Avvio la masterizzazione? [S/N]'))) { Write-Info 'Masterizzazione annullata.'; return $null }
+    if (-not (Test-Yes (Read-Pick 'Avvio la masterizzazione? [S/N]' 0 @('S', 'N')))) { Write-Info 'Masterizzazione annullata.'; return $null }
 
     $media = $first
     $stagingRoot = Join-Path (Split-Path $Game.Folder) ".sibyl-dischi\$($Game.FolderName)"
@@ -695,7 +695,7 @@ if ($Source) {
             "Libreria : $(if ($lastDestination) { $lastDestination } else { Join-Path $lastSource 'Sibyl-Library' })"
         )
         Write-Host ''
-        $answer = Read-Answer '[INVIO] usa queste   [C] cambia   [M] menu principale'
+        $answer = Read-Pick '[INVIO] usa queste   [C] cambia   [M] menu principale' 0 @('C', 'M')
         if ($answer -eq 'M') { Exit-ToMenu $FromMenu }
         if ($answer -eq 'C') {
             $Source = Read-Folder 'Cartella dei download GOG (puoi trascinarla qui)'
@@ -989,10 +989,10 @@ $discRoot = if ($burn) { Invoke-BurnFlow $game } else { $null }
 
 Write-Host ''
 if ($discRoot) {
-    $answer = Read-Answer '[G] gioca ora   [M] menu principale   [Q] esci'
+    $answer = Read-Pick '[G] gioca ora   [M] menu principale   [Q] esci' 0 @('G', 'M', 'Q')
     $playFrom = $discRoot
 } else {
-    $answer = Read-Answer '[G] gioca ora dalla libreria (senza disco)   [M] menu principale   [Q] esci'
+    $answer = Read-Pick '[G] gioca ora dalla libreria (senza disco)   [M] menu principale   [Q] esci' 0 @('G', 'M', 'Q')
     $playFrom = $game.Folder
 }
 if ($answer -eq 'M') { Exit-ToMenu $FromMenu }

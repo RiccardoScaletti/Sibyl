@@ -1,8 +1,8 @@
-# Sibyl :: funzioni condivise tra il menu (Sibyl.ps1), Disc Prep (Organize-GogGames.ps1)
+﻿# Sibyl :: funzioni condivise tra il menu (Sibyl.ps1), Disc Prep (Organize-GogGames.ps1)
 # e il launcher (SibylLauncher.ps1)
 
 # Versione di Sibyl: compare nel menu principale e nelle proprieta' di Sibyl.exe (Build-SibylExe.ps1)
-$SibylVersion = '1.2.1'
+$SibylVersion = '1.2.2'
 
 $ManifestName = 'sibyl.json'
 $LegacyManifestName = 'timerunner.json'   # dischi preparati quando il programma si chiamava TimeRunner
@@ -158,21 +158,107 @@ function Exit-QuitAll([bool]$FromMenu) {
     exit 0
 }
 
-# Scritta e motto centrati sulla larghezza dell'interfaccia (78 colonne)
+# ---------------------------------------------------------------- icone (gamepad)
+
+# Le icone sono scritte in ASCII e diventano caratteri a blocchi solo a schermo, come $BarFull,
+# per non dipendere dalla codifica del file:  . chiaro   : medio   % scuro   # pieno   @ riflesso
+$IconShades = @{ [char]'.' = [char]0x2591; [char]':' = [char]0x2592; [char]'%' = [char]0x2593; [char]'#' = [char]0x2588; [char]'@' = [char]0x2588 }
+$IconColors = @{ [char]'.' = $Theme.Soft; [char]':' = $Theme.Accent; [char]'%' = $Theme.Frame; [char]'#' = $Theme.Title; [char]'@' = $Theme.Text }
+
+# Icona piccola, ferma accanto alle scritte delle intestazioni
+$SmallIcon = @'
+          .:::::.
+      .:%#########::.
+    ..%##########%%%:..
+   .%#%::#######%%::%#%.
+  .%####%:%#%%%%%:%##%#%.
+ .:#%.::##::%%%::#%%%%%%:.
+ .%:::::.%:#...%:%:::%::%.
+ .%#%:::##::%%%:.%%%::%%:.
+  .#####%:%#%%%%:::%%%%%.
+   .%#%:%######%%%:::%%.
+    .:%#########%%%%:..
+      .:%#######%%%:.
+        ..:::::::..
+'@
+
+# Icona grande, animata nelle schermate del launcher: gira solo il riflesso sulla scocca
+$PadArt = @'
+                     .............
+               .....:::%%%%%%%%:::.....
+              ..::%################%:...
+           ..::%####################%%%::..
+         ...%######################%%%%%%:...
+       .....::%###################%%%%%::......
+      ..:##%::.:%################%%%%:..:%###:..
+     ..:#######:..%#############%%%:..:#######%..
+    ..:#########%:.:###########%%%:.:%########%:..
+    ..%###%%%%####:::%%%::...::%::::####%%%%%%%%...
+   ..%###%....:#####:..::%%%%::..:#####%:%%::%##%..
+  ..:##%::.:::.:%%##%.%#%%::%%#%.:#%%::::%%::::%%:..
+  ..:#%.::::::::..%#:%#%:....:%#%.%%:::::%%:::::%:..
+  ..:#%.::::::::..%%:%#%:.....%#%.%%::::::%:.:::%:..
+  ..:##%%:.:::.:%%##:.%#%::::%#%..%%%:%:::::::%%%:..
+   ..%####:::::####%:.::%%%%%%:..:%%%%%%::::%%##%..
+    .:############:.:%%%%::::::%::.:%%%%%::%%##%:..
+    ..:#########%.:%#########%%%%%%:.:%%%%%%%%%:..
+     ..%######%:.:%###########%%%%%%:..:%%%%%%:..
+      ..:##%::::##############%%%%%%%%:..::%%:..
+       ....::%#################%%%%%%%%::::....
+         ..:%##################%%%%%%%%%%%...
+          ...:%#################%%%%%%%::...
+            ...::%%#############%%%%::...
+               .....:%%%%%%%%%%%%:.....
+                    ..............
+'@
+
+# Una riga di icona in pezzi dello stesso carattere e colore (meno scritture per riga)
+function ConvertTo-IconRow([string]$Codes) {
+    $segments = foreach ($run in [regex]::Matches($Codes, ' +|\.+|:+|%+|#+|@+|[^ .:%#@]+')) {
+        $c = $run.Value[0]
+        $ch = if ($IconShades.ContainsKey($c)) { $IconShades[$c] } else { [char]' ' }
+        $color = if ($IconColors.ContainsKey($c)) { $IconColors[$c] } else { $Theme.Faint }
+        @{ Text = "$ch" * $run.Length; Color = [ConsoleColor]$color }
+    }
+    return , @($segments)
+}
+
+# In una console vera si scrive direttamente (molto piu' veloce di Write-Host: serve all'animazione)
+function Write-IconRow($Segments) {
+    if ([Console]::IsOutputRedirected) {
+        foreach ($segment in $Segments) { Write-Host $segment.Text -ForegroundColor $segment.Color -NoNewline }
+        return
+    }
+    $old = [Console]::ForegroundColor
+    foreach ($segment in $Segments) { [Console]::ForegroundColor = $segment.Color; [Console]::Write($segment.Text) }
+    [Console]::ForegroundColor = $old
+}
+
+# Icona piccola a sinistra; a destra scritta, riga vuota e motto, centrati tra loro e
+# all'altezza dell'icona. Il tutto parte dal margine dell'interfaccia (2 colonne).
 function Write-Logo([string]$Name = 'Sibyl') {
     $logo = $Logos[$Name]
-    $lines = $logo.Art -split "`r?`n"
-    $width = ($lines | Measure-Object -Property Length -Maximum).Maximum
-    $indent = ' ' * [math]::Max(2, [math]::Floor((78 - $width) / 2))
-    foreach ($line in $lines) { Write-Host "$indent$line" -ForegroundColor $Theme.Title }
-    Write-Host ''
-    Write-Host ((' ' * [math]::Max(2, [math]::Floor((78 - $logo.Tagline.Length) / 2))) + $logo.Tagline) -ForegroundColor $Theme.Accent
+    $art = @($logo.Art -split "`r?`n")
+    $artWidth = ($art | Measure-Object -Property Length -Maximum).Maximum
+    $width = [math]::Max($artWidth, $logo.Tagline.Length)
+    $text = @($art | ForEach-Object { @{ Text = (' ' * [math]::Floor(($width - $artWidth) / 2)) + $_; Color = $Theme.Title } })
+    $text += @{ Text = ''; Color = $Theme.Title }
+    $text += @{ Text = (' ' * [math]::Floor(($width - $logo.Tagline.Length) / 2)) + $logo.Tagline; Color = $Theme.Accent }
+    $icon = @($SmallIcon -split "`r?`n")
+    $iconWidth = ($icon | Measure-Object -Property Length -Maximum).Maximum
+    $first = [math]::Floor(($icon.Count - $text.Count) / 2)
+    for ($i = 0; $i -lt $icon.Count; $i++) {
+        Write-Host '  ' -NoNewline
+        Write-IconRow (ConvertTo-IconRow $icon[$i].PadRight($iconWidth))
+        $j = $i - $first
+        if ($j -ge 0 -and $j -lt $text.Count) { Write-Host ('   ' + $text[$j].Text) -ForegroundColor $text[$j].Color -NoNewline }
+        Write-Host ''
+    }
 }
 
 function Write-Banner([string]$Subtitle, [string]$Logo = 'Sibyl') {
     try { $Host.UI.RawUI.WindowTitle = $Logos[$Logo].Window } catch { }
-    Write-Host ''
-    Write-Logo $Logo
+    Write-Logo $Logo   # niente riga vuota sopra: la prima riga dell'icona fa gia' da margine
     Write-Host ''
     if ($Subtitle) {
         $label = " $((T $Subtitle).ToUpper()) "
@@ -238,6 +324,36 @@ function Read-KeyChoice([string[]]$Allowed, [string]$Default) {
     }
 }
 
+# Scelta con domanda, senza INVIO: una lettera tra $Letters oppure un numero da 1 a $Count.
+# Un numero parte appena non puo' piu' diventare un numero valido piu' lungo: con 12 voci "3"
+# parte subito, "1" aspetta la seconda cifra (o INVIO). Restituisce la lettera, il numero come
+# testo oppure '' per INVIO. Con l'input rediretto si legge una riga intera, come Read-Answer.
+function Read-Pick([string]$Prompt, [int]$Count = 0, [string[]]$Letters = @()) {
+    Write-Keys "$Prompt " -NoNewline
+    Write-Host '> ' -ForegroundColor $Theme.Accent -NoNewline
+    if ([Console]::IsInputRedirected) { return "$(Read-Host)".Trim().ToUpper() }
+    $typed = ''
+    while ($true) {
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -eq 'Enter') { Write-Host ''; return $typed }
+        if ($key.Key -eq 'Backspace') {
+            if ($typed) { $typed = $typed.Substring(0, $typed.Length - 1); Write-Host "`b `b" -NoNewline }
+            continue
+        }
+        $ch = "$($key.KeyChar)".ToUpper()
+        if ($ch -eq 'Y' -and $Letters -contains 'S' -and $Letters -notcontains 'Y') { $ch = 'S' }   # "yes" vale come "si"
+        if ($Count -and $ch -match '^\d$') {
+            $n = [int]($typed + $ch)
+            if ($n -lt 1 -or $n -gt $Count) { continue }
+            $typed += $ch
+            Write-Host $ch -ForegroundColor $Theme.Title -NoNewline
+            if ($n * 10 -gt $Count) { Write-Host ''; return $typed }
+            continue
+        }
+        if (-not $typed -and $Letters -contains $ch) { Write-Host $ch -ForegroundColor $Theme.Title; return $ch }
+    }
+}
+
 function Confirm-Action([string]$Question) {
     Write-Keys "$Question   [S] si   [N] no"
     return (Read-KeyChoice @('S', 'N') 'N') -eq 'S'
@@ -278,7 +394,7 @@ $DiscWidth = 37
 $DiscHeight = 15
 $DiscIndent = 20
 $DiscFrameCount = 12
-$DiscSpin = @{ Top = -1; Bottom = -1; Frame = 0; Next = [datetime]::MinValue }
+$DiscSpin = @{ Top = -1; Bottom = -1; Frame = 0; Next = [datetime]::MinValue; Kind = 'disc' }
 
 function Get-DiscFrames {
     if (Get-Variable -Name DiscFrames -Scope Script -ErrorAction SilentlyContinue) { return $script:DiscFrames }
@@ -319,11 +435,76 @@ function Get-DiscFrames {
     return $frames
 }
 
-function Write-DiscFrame([int]$Index) {
-    $frame = (Get-DiscFrames)[$Index % $DiscFrameCount]
-    foreach ($row in $frame) {
-        Write-Host (' ' * $DiscIndent) -NoNewline
-        foreach ($segment in $row) { Write-Host $segment.Text -ForegroundColor $segment.Color -NoNewline }
+# Il gamepad del launcher: croce direzionale, tasti e anello centrale restano fermi (le tre ellissi),
+# sul resto della scocca i blocchi pieni e scuri seguono una luce che gira, con un riflesso bianco
+# nella sua direzione
+$PadFrameCount = 16
+$PadIndent = 13   # 52 colonne centrate sulle 78 dell'interfaccia
+$PadStill = @(
+    @{ X = 10.9; Y = 12.5; RX = 9.4; RY = 7.5 },
+    @{ X = 26.5; Y = 12.5; RX = 7.6; RY = 4.2 },
+    @{ X = 42.5; Y = 12.5; RX = 9.4; RY = 7.5 }
+)
+
+function Get-PadFrames {
+    if (Get-Variable -Name PadFrames -Scope Script -ErrorAction SilentlyContinue) { return $script:PadFrames }
+    $rows = @($PadArt -split "`r?`n")
+    # Le celle della scocca che cambiano, con la loro posizione rispetto al centro (calcolate una volta)
+    $cells = for ($y = 0; $y -lt $rows.Count; $y++) {
+        for ($x = 0; $x -lt $rows[$y].Length; $x++) {
+            if ($rows[$y][$x] -ne '#' -and $rows[$y][$x] -ne '%') { continue }
+            $still = $false
+            foreach ($z in $PadStill) {
+                $ex = ($x - $z.X) / $z.RX; $ey = ($y - $z.Y) / $z.RY
+                if ($ex * $ex + $ey * $ey -le 1) { $still = $true; break }
+            }
+            if ($still) { continue }
+            $nx = ($x - 26) / 26; $ny = ($y - 12.5) / 13
+            @{ X = $x; Y = $y; NX = $nx; NY = $ny; Angle = [math]::Atan2($ny, $nx) }
+        }
+    }
+    $script:PadCodes = for ($f = 0; $f -lt $PadFrameCount; $f++) {
+        $theta = 2 * [math]::PI * $f / $PadFrameCount
+        $cos = [math]::Cos($theta); $sin = [math]::Sin($theta)
+        $grid = @($rows | ForEach-Object { , $_.ToCharArray() })
+        foreach ($c in $cells) {
+            $light = $c.NX * $cos + $c.NY * $sin
+            $off = [math]::Abs((($c.Angle - $theta) % (2 * [math]::PI) + 3 * [math]::PI) % (2 * [math]::PI) - [math]::PI)
+            $grid[$c.Y][$c.X] = if ($light -lt -0.17) { '%' } elseif ($off -lt 0.3) { '@' } else { '#' }
+        }
+        , @($grid | ForEach-Object { -join $_ })
+    }
+    $frames = foreach ($codes in $script:PadCodes) { , @($codes | ForEach-Object { , (ConvertTo-IconRow $_) }) }
+    $script:PadFrames = $frames
+    return $frames
+}
+
+# Fotogrammi e rientro dell'animazione: 'disc' (disco che gira) o 'pad' (gamepad del launcher)
+function Get-SpinFrames([string]$Kind) { if ($Kind -eq 'pad') { Get-PadFrames } else { Get-DiscFrames } }
+
+# Il gamepad e' grande: tra un fotogramma e l'altro si riscrivono solo i tratti che cambiano
+function Write-PadChanges([int]$From, [int]$To) {
+    $a = $script:PadCodes[$From % $PadFrameCount]
+    $b = $script:PadCodes[$To % $PadFrameCount]
+    for ($y = 0; $y -lt $b.Count; $y++) {
+        if ($a[$y] -ceq $b[$y]) { continue }
+        $x = 0
+        while ($x -lt $b[$y].Length) {
+            if ($a[$y][$x] -eq $b[$y][$x]) { $x++; continue }
+            $start = $x
+            while ($x -lt $b[$y].Length -and $a[$y][$x] -ne $b[$y][$x]) { $x++ }
+            [Console]::SetCursorPosition($PadIndent + $start, $DiscSpin.Top + $y)
+            Write-IconRow (ConvertTo-IconRow $b[$y].Substring($start, $x - $start))
+        }
+    }
+}
+
+function Write-DiscFrame([int]$Index, [string]$Kind = 'disc') {
+    $frames = Get-SpinFrames $Kind
+    $indent = ' ' * $(if ($Kind -eq 'pad') { $PadIndent } else { $DiscIndent })
+    foreach ($row in $frames[$Index % $frames.Count]) {
+        Write-Host $indent -NoNewline
+        Write-IconRow $row
         Write-Host ''
     }
 }
@@ -336,11 +517,12 @@ function Write-DiscFrame([int]$Index) {
 # disco e i fotogrammi si accumulerebbero uno sotto l'altro. Per questo Start-DiscSpin fa
 # scorrere subito la finestra di tutto lo spazio che serve (disco + $ExtraLines righe per barre
 # e messaggi), e Update-DiscSpin si ferma se il testo esce comunque da quello spazio.
-function Start-DiscSpin([int]$ExtraLines = 8) {
+function Start-DiscSpin([int]$ExtraLines = 8, [string]$Kind = 'disc') {
     $DiscSpin.Top = -1
     $DiscSpin.Frame = 0
+    $DiscSpin.Kind = $Kind
     try {
-        $need = (Get-DiscFrames)[0].Count + $ExtraLines
+        $need = (Get-SpinFrames $Kind)[0].Count + $ExtraLines
         [void][Console]::CursorTop   # output rediretto: lancia e si salta la preparazione
         Write-Host ("`n" * $need) -NoNewline
         $top = [Console]::CursorTop - $need
@@ -350,7 +532,7 @@ function Start-DiscSpin([int]$ExtraLines = 8) {
     } catch {
         $DiscSpin.Top = -1
     }
-    Write-DiscFrame 0
+    Write-DiscFrame 0 $Kind
 }
 
 function Update-DiscSpin {
@@ -360,9 +542,12 @@ function Update-DiscSpin {
         $left = [Console]::CursorLeft
         $top = [Console]::CursorTop
         if ($top -ge $DiscSpin.Bottom) { $DiscSpin.Top = -1; return }   # uscito dallo spazio riservato
-        [Console]::SetCursorPosition(0, $DiscSpin.Top)
         $DiscSpin.Frame++
-        Write-DiscFrame $DiscSpin.Frame
+        if ($DiscSpin.Kind -eq 'pad') { Write-PadChanges ($DiscSpin.Frame - 1) $DiscSpin.Frame }
+        else {
+            [Console]::SetCursorPosition(0, $DiscSpin.Top)
+            Write-DiscFrame $DiscSpin.Frame $DiscSpin.Kind
+        }
         [Console]::SetCursorPosition($left, $top)
     } catch {
         $DiscSpin.Top = -1
@@ -424,7 +609,7 @@ if (-not ('Sibyl.Native' -as [type])) {
 }
 [void][Sibyl.Native]::SetErrorMode(0x8001)   # SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX
 
-# Finestra della console classica di circa 700x700 pixel, con il testo largo quanto la finestra
+# Finestra della console classica di circa 800x700 pixel, con il testo largo quanto la finestra
 # (niente barra di scorrimento orizzontale). Windows Terminal non lascia ridimensionare la propria
 # finestra: li' non si fa niente. Per questo Sibyl.exe apre sempre la console classica.
 function Set-SibylWindowSize {
@@ -432,7 +617,7 @@ function Set-SibylWindowSize {
     try {
         $hwnd = [Sibyl.Native]::GetConsoleWindow()
         if ($hwnd -eq [IntPtr]::Zero) { return }
-        [void][Sibyl.Native]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 700, 700, 0x0006)   # SWP_NOMOVE | SWP_NOZORDER
+        [void][Sibyl.Native]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 800, 700, 0x0006)   # SWP_NOMOVE | SWP_NOZORDER
         $raw = $Host.UI.RawUI
         $raw.BufferSize = New-Object Management.Automation.Host.Size $raw.WindowSize.Width, ([math]::Max($raw.BufferSize.Height, 3000))
     } catch { }
@@ -500,7 +685,7 @@ function Set-Autostart([bool]$On) {
         $shortcut.TargetPath = Join-Path $PSScriptRoot 'SibylLauncher.bat'
         $shortcut.WorkingDirectory = $PSScriptRoot
     }
-    $shortcut.WindowStyle = 1   # finestra normale: la dimensione la sceglie Sibyl (700x700)
+    $shortcut.WindowStyle = 1   # finestra normale: la dimensione la sceglie Sibyl (800x700)
     $shortcut.Save()
 }
 

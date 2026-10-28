@@ -159,12 +159,17 @@ function Wait-DiscChange($Disc, [string]$Prompt, [switch]$AllowReplay) {
 
 # ---------------------------------------------------------------- schermata d'attesa
 
+# Schermate con il gamepad animato: occupa tutta la finestra, senza intestazione
+function Show-PadScreen([int]$ExtraLines) {
+    Clear-Host
+    1..3 | ForEach-Object { Write-Host '' }   # un po' di margine sopra il gamepad
+    Start-DiscSpin $ExtraLines 'pad'
+}
+
 # Disco appena inserito (o gioco scelto tra quelli installati, con -Memory): un paio di secondi di
-# disco che gira mentre il lettore lo legge
+# gamepad animato mentre il lettore lo legge
 function Show-DiscReading([switch]$Memory) {
-    Show-Screen $(if ($Memory) { 'lettura memoria' } else { 'lettura disco' })
-    Write-Host ''
-    Start-DiscSpin
+    Show-PadScreen 2
     Write-Host ''
     $text = if ($Memory) { 'lettura dei giochi in memoria in corso...' } else { 'lettura del disco in corso...' }
     $until = (Get-Date).AddSeconds(2)
@@ -180,17 +185,14 @@ function Show-DiscReading([switch]$Memory) {
 
 # Restituisce il disco trovato, oppure 'library' (gioca senza disco) / 'menu' / 'quit'
 function Wait-ForDisc {
-    Show-Screen 'pronto'
+    try { $Host.UI.RawUI.WindowTitle = $Logos.Launcher.Window } catch { }
+    Show-PadScreen 4
     $roots = @(Get-DiscRoots)
-    if ($roots.Count) { Write-Info "Lettori: $($roots -join '  ')" }
-    else { Write-Alert 'Nessun lettore ottico trovato: collega il masterizzatore, resto in attesa.' }
     $installed = @(Get-InstalledGames $Library).Count
-    if ($installed) { Write-Info "Giochi installati: $installed   ([L] per giocare senza disco)" }
-    Write-Host ''
-    Write-DiscFrame 0
+    if ($roots.Count) { Write-Info "Lettori: $($roots -join '  ')   Giochi installati: $installed" }
+    else { Write-Alert 'Nessun lettore ottico trovato: collega il masterizzatore, resto in attesa.' }
     Write-Host ''
     Write-Keys '        [L] gioca senza disco   [M] menu principale   [Q] spegni'
-    Write-Host ''
 
     $blink = $true
     $candidate = $null
@@ -198,9 +200,8 @@ function Wait-ForDisc {
     $nextBlink = [datetime]::MinValue
     while ($true) {
         $key = Read-KeyNow
-        if ($key -and "$($key.KeyChar)".ToUpper() -eq 'Q') { Write-Host ''; return 'quit' }
-        if ($key -and "$($key.KeyChar)".ToUpper() -eq 'M') { Write-Host ''; return 'menu' }
-        if ($key -and "$($key.KeyChar)".ToUpper() -eq 'L') { Write-Host ''; return 'library' }
+        $pressed = if ($key) { @{ Q = 'quit'; M = 'menu'; L = 'library' }["$($key.KeyChar)".ToUpper()] }
+        if ($pressed) { Stop-DiscSpin; Write-Host ''; return $pressed }
         if ((Get-Date) -ge $nextBlink) {
             $color = if ($blink) { $Theme.Title } else { $Theme.Accent }
             Write-Status '                >>>   INSERISCI UN DISCO   <<<' $color
@@ -219,7 +220,8 @@ function Wait-ForDisc {
             $candidate = $disc
             $nextPoll = (Get-Date).AddMilliseconds($PollMs)
         }
-        Start-Sleep -Milliseconds 100
+        Update-DiscSpin
+        Start-Sleep -Milliseconds 50
     }
 }
 
@@ -473,11 +475,8 @@ function Copy-DiscSet($Disc, [string]$Staging) {
     [void][IO.Directory]::CreateDirectory($Staging)
     $current = $Disc
     while ($true) {
-        Show-Screen 'installazione'
+        Show-PadScreen 3
         Write-Info "$($m.title) e' su $count dischi: vengono copiati sul PC, poi si installa."
-        Write-Host ''
-        Start-DiscSpin
-        Write-Host ''
         Copy-DiscFiles $current $Staging
         Stop-DiscSpin
         $copied[(Get-DiscNumber $current.Manifest)] = $true
@@ -496,8 +495,6 @@ function Install-Game($Disc, [string]$SourceRoot) {
     $gameHome = Get-GameHome $m
     $dir = Join-Path $gameHome 'game'
     [void][IO.Directory]::CreateDirectory($dir)
-    Start-DiscSpin   # gira sopra le barre finche' l'installer legge dal disco
-    Write-Host ''
     $entry = $null
 
     if ((Get-Prop $m 'mode') -eq 'portable') {
@@ -610,7 +607,7 @@ function Select-LaunchExe([string]$Dir, $Candidates) {
         Write-Host $Candidates[$i].FullName.Substring($Dir.TrimEnd('\').Length + 1) -ForegroundColor $Theme.Text
     }
     while ($true) {
-        $answer = Read-Answer 'Numero   [INVIO] = 1'
+        $answer = Read-Pick 'Numero   [INVIO] = 1' $Candidates.Count
         if (-not $answer) { return $Candidates[0].FullName }
         $n = 0
         if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $Candidates.Count) { return $Candidates[$n - 1].FullName }
@@ -812,10 +809,9 @@ function Invoke-DiscSession($Disc) {
                     $Disc = $last
                     $source = $staging
                 }
-                Show-Screen 'installazione'
+                Show-PadScreen 4   # il gamepad gira sopra le barre finche' l'installer lavora
                 Write-Info "$($m.title) viene installato in $(Get-GameHome $m)"
                 Write-Info 'Solo al primo inserimento: le volte successive parte subito.'
-                Write-Host ''
                 $state = Install-Game $Disc $source
                 Write-Ok 'Installazione completata'
             }
@@ -887,7 +883,7 @@ function Select-InstalledGame {
     }
     Write-Host ''
     while ($true) {
-        $answer = Read-Answer 'Numero del gioco   [INVIO] = torna all''attesa del disco'
+        $answer = Read-Pick 'Numero del gioco   [INVIO] = torna all''attesa del disco' $games.Count
         if (-not $answer) { return $null }
         $n = 0
         if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $games.Count) { return $games[$n - 1] }
